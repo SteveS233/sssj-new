@@ -189,8 +189,8 @@ public class CafePetFeatureTests
     // =================================================================
 
     /// <summary>
-    /// 允许的下行 sCmd 只有 10 个，每个在 <c>NCafePetLogic.lua</c> 里都有真实的
-    /// <c>&lt;sCmd&gt;Rsp</c>。特别注意**上行名不在里面**的那 6 个。
+    /// 允许的下行 sCmd 只有 14 个，每个在 <c>NCafePetLogic.lua</c> / <c>NCafePetTour.lua</c> 里
+    /// 都有真实的 <c>&lt;sCmd&gt;Rsp</c>。特别注意**上行名不在里面**的那 6 个。
     /// </summary>
     [Fact]
     public void AllowedReplyCmds_AreExactlyTheOnesWithRspFunctions()
@@ -200,12 +200,16 @@ public class CafePetFeatureTests
             {
                 "AdoptPet",             // :718 AdoptPetRsp        ← 上行是 OnNewPet
                 "ChangePetCafeState",   // :827
+                "CheckTourIsSuccess",   // NCafePetTour.lua:418
+                "CompleteTour",         // NCafePetTour.lua:436
                 "GetCafeFoodNum",       // :432
                 "GiveUpPet",            // :793 GiveUpPetRsp       ← 上行是 OnGiveupPet
                 "GiveUpPetOwned",       // :962 GiveUpPetOwnedRsp  ← 上行是 DelPet
                 "PetGift",              // :920
                 "PetRename",            // :943
                 "SetFood",              // :225
+                "SetTourPets",          // NCafePetTour.lua:128
+                "UnLockTourArea",       // NCafePetTour.lua:63
                 "UpdateFoodBoxs",       // :100
                 "UpdatePet",            // :761（纯下行推送）
             },
@@ -1149,17 +1153,17 @@ public class CafePetFeatureTests
 
     /// <summary>
     /// 「已取证但未实现」清单本身也钉住：<c>OnBuyBoxFood</c> 是死代码
-    /// （唯一调用点 <c>UI_PetFood.lua:21</c> 被注释掉了），其余 6 个是远征 / 任务奖励。
+    /// （唯一调用点 <c>UI_PetFood.lua:21</c> 被注释掉了）、
+    /// <c>GetPetMissionAward</c> 跨域、<c>GetPawAward</c> 属图鉴子系统且全仓无 Rsp。
+    ///
+    /// ★ 远征四条（<c>UnLockTourArea</c>/<c>SetTourPets</c>/<c>CheckTourIsSuccess</c>/
+    /// <c>CompleteTour</c>）**第十八轮已实现**，从本清单移出 —— 见 <see cref="CafePetTourTests"/>。
     /// </summary>
     [Fact]
-    public void KnownUnimplemented_ListsTheSevenDeferredCommands()
+    public void KnownUnimplemented_ListsTheThreeDeferredCommands()
     {
         Assert.Equal(
-            new[]
-            {
-                "CheckTourIsSuccess", "CompleteTour", "GetPawAward", "GetPetMissionAward",
-                "OnBuyBoxFood", "SetTourPets", "UnLockTourArea",
-            },
+            new[] { "GetPawAward", "GetPetMissionAward", "OnBuyBoxFood" },
             CafePetFeature.KnownUnimplemented.Keys.OrderBy(s => s, StringComparer.Ordinal));
         Assert.Contains("死代码", CafePetFeature.KnownUnimplemented["OnBuyBoxFood"]);
     }

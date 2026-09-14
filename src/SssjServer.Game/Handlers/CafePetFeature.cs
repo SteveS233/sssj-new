@@ -92,7 +92,7 @@ namespace SssjServer.Game.Handlers;
 /// <c>grep Blocking UI_Pet*.lua NCafePet*.lua UI_NCafe*.lua</c> 零命中 ⇒ 按 docs/05 §0.4，
 /// 未实现的命令只是「点了没反应」，不会卡界面。这也是本轮敢先只做「有取证的那批」的依据。
 /// </summary>
-public sealed class CafePetFeature : IGameFeature
+public sealed partial class CafePetFeature : IGameFeature
 {
     // =================================================================
     //  常量
@@ -198,26 +198,26 @@ public sealed class CafePetFeature : IGameFeature
     ///     整行被注释掉了，改成弹「去商店 20010 买」。</item>
     ///   <item><c>GetPetMissionAward</c> —— 需要任务/成就域的 <c>BattlePass:GetWeekMissionConfig</c>，
     ///     跨域；而且它的 Rsp 本身有 bug（见 docs 小结）。</item>
-    ///   <item>宠物远征 5 个（<c>NCafePetTour.lua</c>）：<c>UnLockTourArea</c>(:58) /
-    ///     <c>SetTourPets</c>(:124) / <c>CheckTourIsSuccess</c>(:413) / <c>CompleteTour</c>(:432) /
-    ///     <c>GetPawAward</c>(:462)。它们的状态全在 group 49 的 501/510/550/700/750/800/850 偏移上，
-    ///     是一整套独立系统，留给下一轮。</item>
+    ///   <item><c>GetPawAward</c>（<c>NCafePetTour.lua:462</c>）—— ★ 属于**宠物图鉴/爪印**子系统
+    ///     （消费界面 <c>UI_PetRikiAward</c>、状态存 1450 + awardId），**不是远征**。
+    ///     而且它在全仓**没有任何 <c>GetPawAwardRsp</c> 函数** ⇒ 回包会撞 nil 调用，
+    ///     只能不回包。留待图鉴子系统整体实现时一起做。</item>
     /// </list>
+    ///
+    /// ★ 宠物远征 4 条（<c>UnLockTourArea</c> / <c>SetTourPets</c> / <c>CheckTourIsSuccess</c> /
+    /// <c>CompleteTour</c>）**已在第十八轮实现**，见 <c>CafePetFeature.Tour.cs</c>。
     /// </summary>
     public static readonly IReadOnlyDictionary<string, string> KnownUnimplemented =
         new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["OnBuyBoxFood"] = "死代码：唯一调用点 UI_PetFood.lua:21 已被注释，改走商店 20010",
             ["GetPetMissionAward"] = "需要任务域 BattlePass:GetWeekMissionConfig，跨域未实现",
-            ["UnLockTourArea"] = "宠物远征（NCafePetTour.lua:58），未实现",
-            ["SetTourPets"] = "宠物远征（NCafePetTour.lua:124），未实现",
-            ["CheckTourIsSuccess"] = "宠物远征（NCafePetTour.lua:413），未实现",
-            ["CompleteTour"] = "宠物远征（NCafePetTour.lua:432），未实现",
-            ["GetPawAward"] = "宠物爪印奖励（NCafePetTour.lua:462），未实现",
+            ["GetPawAward"] = "宠物图鉴爪印奖励（NCafePetTour.lua:462），全仓无 GetPawAwardRsp ⇒ 只能不回包",
         };
 
     private GameFeatureContext _ctx = null!;
     private CafeTable _table = CafeTable.Empty;
+    private PetTourTable _tourTable = PetTourTable.Empty;
     private readonly Random _rng = new();
 
     /// <summary>GameModule 反射装配用的公开无参构造（<c>GameFeatureLoader.Discover</c> 要求它存在）。</summary>
@@ -240,6 +240,7 @@ public sealed class CafePetFeature : IGameFeature
     {
         _ctx = ctx;
         _table = CafeTable.Load(Path.GetFullPath(ctx.Options.SettingDirectory));
+        _tourTable = PetTourTable.Load(Path.GetFullPath(ctx.Options.SettingDirectory));
         ctx.MapFunction(Function, OnCommand);
     }
 
@@ -292,6 +293,12 @@ public sealed class CafePetFeature : IGameFeature
             case CmdPetRename: OnPetRename(session, player, state, obj); break;
             case CmdDelPet: OnDelPet(session, player, state, obj, now); break;
             case CmdBuyCafeFood: OnBuyCafeFood(session, player, state, obj, now); break;
+
+            // ---- 远征子系统（CafePetFeature.Tour.cs）----
+            case CmdUnLockTourArea: OnUnLockTourArea(session, player, state, obj); break;
+            case CmdSetTourPets: OnSetTourPets(session, player, state, obj, now); break;
+            case CmdCheckTourIsSuccess: OnCheckTourIsSuccess(session, player, state, obj, now); break;
+            case CmdCompleteTour: OnCompleteTour(session, player, state, obj); break;
 
             default:
                 if (KnownUnimplemented.TryGetValue(sCmd, out var why))
@@ -1535,6 +1542,12 @@ public sealed class CafePetFeature : IGameFeature
         RspPetGift,               // :920
         RspPetRename,             // :943
         RspUpdatePet,             // :761
+
+        // ---- 远征子系统（NCafePetTour.lua，均有真实 <sCmd>Rsp）----
+        RspUnLockTourArea,        // :63
+        RspSetTourPets,           // :128
+        RspCheckTourIsSuccess,    // :418
+        RspCompleteTour,          // :436
     };
 
     // =================================================================
