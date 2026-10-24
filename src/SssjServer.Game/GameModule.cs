@@ -119,6 +119,8 @@ public sealed class GameModule
         // ★ SpineSuit.txt：让「发放 genre 19 皮肤道具」顺带解锁 group 4 的服饰标记。
         // 与上面的 Boxes 是同一条链的两环（礼包→皮肤道具→服饰可穿），缺一环都是「钱花了没东西」。
         _rewards.Suits = GirlDressTable.Load(settingDir);
+        _rewards.CharacterCards = _characterCards;
+        _rewards.Furniture = HouseTable.Load(settingDir);
         _gmUnlock = new GmUnlock(options, _chapters, _itemTemplates, _characterCards, _missions,
                                  _guides, _playerExp, _missingIcons);
         _world = new World(_store, options, _playerExp);
@@ -208,7 +210,9 @@ public sealed class GameModule
         // ---- 主线关卡：ChapterMsg（进关 / 结算 / 章节奖励）----
         // ① 进关与章节奖励是 sFunction="ChapterMsg" 的字符串命令（Lib.lua:378 SendCmd）
         // ② 通关结算被 LuaCall.DoSettle(252) 包了一层（GameManager.SendInfoToServer）
-        _chapterHandler = new ChapterHandler(_store, luaCalls, _chapters, _options.SpendVigour, _rewards);
+        _chapterHandler = new ChapterHandler(_store, luaCalls, _chapters, _options.SpendVigour, _rewards,
+            cafe: CafeTable.Load(Path.GetFullPath(_options.SettingDirectory)),
+            girlLove: GirlLoveTable.Load(Path.GetFullPath(_options.SettingDirectory)));
         luaCalls.MapFunction(ChapterHandler.Function, _chapterHandler.OnScriptCall);
 
         // ---- 编队保存：出击流程的第一道服务器闸门（UI_Formation:ApplySave 等回包）----
@@ -311,6 +315,14 @@ public sealed class GameModule
                     Log.Error($"[session {session.Id}] 登录准备钩子异常：{e}");
                 }
             }
+        }
+
+        // Completed-tutorial saves with a persisted name must not re-enter initial naming.
+        if (player.GetTask(1, 15) >= 6 && player.GetTask(1, 14) == 0 &&
+            !string.IsNullOrWhiteSpace(player.Name) && player.Name != player.Account)
+        {
+            player.SetTask(1, 14, 1);
+            _store.Save(player);
         }
 
         // 顺序很关键（实测得出）：pf=1005 必须先发。
@@ -430,6 +442,12 @@ public sealed class GameModule
         player.SetTask(1, 14, 1);
 
         _store.Save(player);   // 名称 + (1,14) 一并持久化
+
+        // Publish the naming flag before the serial callback advances the tutorial UI.
+        session.Push(GamePf.TaskValueSyncRsp, new TaskValueSyncRsp
+        {
+            Arr = { new TaskInt { Id = Player.ComposeTaskId(1, 14), Value = 1 } }
+        });
 
         // 成功：pf=1006 + 请求 serial，空 RenameRsp（客户端仅需回调触发）
         session.Send(GamePf.RenameRsp, packet.Serial, new RenameRsp());

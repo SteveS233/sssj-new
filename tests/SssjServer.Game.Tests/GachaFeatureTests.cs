@@ -226,6 +226,8 @@ public class GachaFeatureTests
     public async Task Lottery_WithoutTicket_RepliesNotEnough()
     {
         using var h = await FeatureHarness.CreateAsync("gacha-broke");
+        h.Player.SetMoney(MoneyType.FreeDiamond, 0);
+        h.Player.SetMoney(MoneyType.PayDiamond, 0);
         Assert.DoesNotContain(h.Player.Items, i => i.Genre == OneG && i.Detail == OneD);
 
         await SendAsync(h, GachaFeature.FnLottery, $"{{\"nId\":{NormalPoolId},\"bTen\":false}}");
@@ -258,6 +260,41 @@ public class GachaFeatureTests
 
     // ================= Lottery：成功路径 =================
 
+    [Theory]
+    [InlineData(false, 200, 80, 50, 80)]
+    [InlineData(false, 100, 80, 0, 30)]
+    [InlineData(true, 1000, 800, 0, 300)]
+    public async Task Lottery_NoTicket_UsesConfiguredDiamondPrice(bool ten, int free, int paid,
+        int expectedFree, int expectedPaid)
+    {
+        using var h = await FeatureHarness.CreateAsync($"gacha-diamond-{ten}-{free}");
+        var pool = GachaTable.Load(TestPaths.SettingDir).Get(NormalPoolId, DateTimeOffset.UtcNow.ToUnixTimeSeconds())!;
+        Assert.Equal(150, pool.ExchangeRate);
+        Assert.True(pool.CanUseFreeDiamond);
+        h.Player.SetMoney(MoneyType.FreeDiamond, free);
+        h.Player.SetMoney(MoneyType.PayDiamond, paid);
+        await SendAsync(h, GachaFeature.FnLottery, $"{{\"nId\":1,\"bTen\":{ten.ToString().ToLowerInvariant()}}}");
+        Assert.Null(LastReply(h, GachaFeature.FnLottery)["err"]);
+        Assert.Equal(expectedFree, h.Player.GetMoney(MoneyType.FreeDiamond));
+        Assert.Equal(expectedPaid, h.Player.GetMoney(MoneyType.PayDiamond));
+        Assert.Equal(ten ? 10 : 1, h.Player.GetTask(15, 1));
+    }
+
+    [Fact]
+    public async Task Lottery_InsufficientCombinedDiamonds_DoesNotChargeOrDraw()
+    {
+        using var h = await FeatureHarness.CreateAsync("gacha-diamond-poor");
+        h.Player.SetMoney(MoneyType.FreeDiamond, 100);
+        h.Player.SetMoney(MoneyType.PayDiamond, 49);
+        int items = h.Player.Items.Count;
+        await SendAsync(h, GachaFeature.FnLottery, "{\"nId\":1,\"bTen\":false}");
+        Assert.Equal(GachaFeature.ErrNotEnough, LastReply(h, GachaFeature.FnLottery)["err"]!.GetValue<string>());
+        Assert.Equal(100, h.Player.GetMoney(MoneyType.FreeDiamond));
+        Assert.Equal(49, h.Player.GetMoney(MoneyType.PayDiamond));
+        Assert.Equal(items, h.Player.Items.Count);
+        Assert.Equal(0, h.Player.GetTask(15, 1));
+    }
+
     [Fact]
     public async Task Lottery_Single_ConsumesTicketAndGrantsOneCard()
     {
@@ -279,8 +316,9 @@ public class GachaFeatureTests
         Assert.Equal(4u, ticket.Count);
         Assert.Equal(cardsBefore + 1, h.Player.Items.Count(i => i.Genre == 1));
 
-        // 保底计数 +1（该池只有 3★，不会清零）
-        Assert.Equal(1, h.Player.GetTask(GachaFeature.TaskGroup,
+        // 该池也可能随机出4★，出4★时计数清零。
+        var gdpl = Assert.IsType<JsonArray>(awards[0]!["tbGDPL"]);
+        Assert.Equal(gdpl[3]!.GetValue<int>() >= 4 ? 0 : 1, h.Player.GetTask(GachaFeature.TaskGroup,
                                          GachaFeature.TaskProtectBegin + PromisePoolId));
         Assert.Equal(1, h.Player.GetTask(GachaFeature.TaskGroup, GachaFeature.TaskTotal));
         Assert.Equal(1, h.Player.GetTask(GachaFeature.TaskGroup,
@@ -426,10 +464,14 @@ public class GachaFeatureTests
         using var h = await FeatureHarness.CreateAsync("gacha-nogate");
         Assert.Empty(h.Player.Levels);                  // 一关没打
         h.Player.AddItem(OneG, OneD, OneP, OneL, count: 2);
+        h.Player.SetMoney(MoneyType.FreeDiamond, 300);
+        h.Player.SetMoney(MoneyType.PayDiamond, 200);
 
         await SendAsync(h, GachaFeature.FnLottery, $"{{\"nId\":{NormalPoolId},\"bTen\":false}}");
 
         Assert.Null(LastReply(h, GachaFeature.FnLottery)["err"]);
+        Assert.Equal(300, h.Player.GetMoney(MoneyType.FreeDiamond));
+        Assert.Equal(200, h.Player.GetMoney(MoneyType.PayDiamond));
     }
 
     /// <summary>
@@ -539,7 +581,7 @@ public class GachaFeatureTests
     /// （<c>GachaCommon:SetCustomUp</c>，<c>:455..516</c>），并把选择次数 +1。
     /// </summary>
     [Fact]
-    public async Task SetCardCustomUp_StoresPackedChoiceAndBumpsCount()
+    public async Task SetCardCustomUp_ExpiredOrNonCustomPool_DoesNotWriteTasks()
     {
         using var h = await FeatureHarness.CreateAsync("gacha-customup");
 
@@ -548,23 +590,23 @@ public class GachaFeatureTests
 
         int choiceKey = GachaFeature.TaskCardCustomChoice + 6;
         int timeKey = GachaFeature.TaskCardCustomTime + 6;
-        Assert.Equal(113 | (213 << 16), h.Player.GetTask(GachaFeature.TaskGroup, choiceKey));
-        Assert.Equal(1, h.Player.GetTask(GachaFeature.TaskGroup, timeKey));
+        Assert.Equal(0, h.Player.GetTask(GachaFeature.TaskGroup, choiceKey));
+        Assert.Equal(0, h.Player.GetTask(GachaFeature.TaskGroup, timeKey));
 
         await SendAsync(h, GachaFeature.FnSetCardCustomUp,
                         """{"nId":6,"tbItems":[113,213]}""");
-        Assert.Equal(2, h.Player.GetTask(GachaFeature.TaskGroup, timeKey));
+        Assert.Equal(0, h.Player.GetTask(GachaFeature.TaskGroup, timeKey));
     }
 
     /// <summary>只给一张卡时高 16 位为 0，不抛。</summary>
     [Fact]
-    public async Task SetCardCustomUp_WithSingleCard_PacksLowHalfOnly()
+    public async Task SetCardCustomUp_NormalPoolRejectsSelection()
     {
         using var h = await FeatureHarness.CreateAsync("gacha-customup1");
 
         await SendAsync(h, GachaFeature.FnSetCardCustomUp, """{"nId":1,"tbItems":[77]}""");
 
-        Assert.Equal(77, h.Player.GetTask(GachaFeature.TaskGroup,
+        Assert.Equal(0, h.Player.GetTask(GachaFeature.TaskGroup,
                                           GachaFeature.TaskCardCustomChoice + 1));
     }
 

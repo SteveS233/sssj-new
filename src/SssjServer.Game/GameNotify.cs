@@ -312,8 +312,15 @@ public static class GameNotify
     {
         if (granted.IsEmpty)
             return;
+        foreach (var girl in granted.ChangedGirls) PushGirl(session, girl);
         PushMoney(session, player, granted.ChangedMoney);
         PushItems(session, granted.ChangedItems);
+          if (granted.ChangedFurniture.Count > 0)
+          {
+              var response = new AddFornituresRsp { Roleid = player.Roleid };
+              response.NewFurnitures.AddRange(granted.ChangedFurniture.Select(Handlers.HouseFeature.BuildFurniture));
+              session.Push(SssjServer.Protocol.Pf.AddFornituresRsp, response);
+          }
         if (granted.ChangedTasks.Count > 0)
             PushTaskValues(session, granted.ChangedTasks);
     }

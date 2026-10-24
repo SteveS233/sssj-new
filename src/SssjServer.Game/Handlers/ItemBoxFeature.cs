@@ -120,7 +120,8 @@ public sealed class ItemBoxFeature : IGameFeature
 
         // ---- 找背包里的箱子 ----
         var stack = player.Items.FirstOrDefault(
-            it => it.Genre == g && it.Detail == d && it.Particular == p && it.Level == l);
+            it => it.Genre == g && it.Detail == d && it.Particular == p && it.Level == l
+                && it.LockOn == 0 && it.Count > 0);
         if (stack is null || stack.Count == 0)
         {
             Log.Warn($"[session {session.Id}] ItemBox_Open({cmd}) 背包里没有 {name}({g}-{d}-{p}-{l}) ⇒ 拒绝");

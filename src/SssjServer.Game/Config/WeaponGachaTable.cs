@@ -235,6 +235,7 @@ public sealed class WeaponGachaTable
 
     private readonly Dictionary<int, List<WeaponGachaPool>> _pools = new();
     private readonly Dictionary<int, CardStarSeedRow> _seeds = new();
+    private GachaRotation? _rotation;
 
     private WeaponGachaTable() { }
 
@@ -254,6 +255,9 @@ public sealed class WeaponGachaTable
     /// <summary>取该池**当前生效**的那一段；没有任何一段在期内返回 null。</summary>
     public WeaponGachaPool? Get(int id, long now)
     {
+        int? selected = _rotation?.SegmentAt(0, id, now);
+        if (selected.HasValue)
+            return selected > 0 ? Segments(id).ElementAtOrDefault(selected.Value - 1) : null;
         foreach (var seg in Segments(id))
         {
             if (seg.IsOpenAt(now))
@@ -279,7 +283,7 @@ public sealed class WeaponGachaTable
     /// <summary>从 setting 目录加载。缺表返回空表并打 WARN（不抛）。</summary>
     public static WeaponGachaTable Load(string settingDir)
     {
-        var table = new WeaponGachaTable();
+        var table = new WeaponGachaTable { _rotation = GachaRotation.For(settingDir) };
 
         // ---- CardStarSeed.txt（复用 GachaTable 的解析：同一张表、同一套语义）----
         var seedRaw = SettingTable.Load(Path.Combine(settingDir, SeedFileName));

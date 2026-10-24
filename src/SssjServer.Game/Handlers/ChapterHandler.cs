@@ -57,6 +57,8 @@ public sealed class ChapterHandler
     /// <summary>体力不足的客户端错误码（MoneyDef.txt 体力行「通用错误」列 = 20014，UI 文本 ui.Error.20014）。</summary>
     public const int ErrNoVigour = 20014;
 
+    private readonly GirlLoveTable _girlLove;
+    private readonly CafeTable _cafe;
     private readonly PlayerStore _store;
     private readonly LuaCallRouter _luaCalls;
     private readonly ChapterTable _chapters;
@@ -82,8 +84,10 @@ public sealed class ChapterHandler
     public ChapterHandler(PlayerStore store, LuaCallRouter luaCalls, ChapterTable chapters, bool spendVigour,
                           RewardService? rewards = null,
                           ChapterRandomAwardTable? randomAwards = null,
-                          bool grantRandomAward = false)
+                          bool grantRandomAward = false, CafeTable? cafe = null, GirlLoveTable? girlLove = null)
     {
+        _girlLove = girlLove ?? GirlLoveTable.Empty;
+        _cafe = cafe ?? CafeTable.Empty;
         _store = store;
         _luaCalls = luaCalls;
         _chapters = chapters;
@@ -202,6 +206,8 @@ public sealed class ChapterHandler
             }
         }
 
+        var coffeeChanges = CafeBizFeature.RefreshCoffeeConditions(_cafe, player);
+        var girlStoryChanges = GirlLoveFeature.UnlockStories(_girlLove, player);
         _store.Save(player);
 
         Log.Info($"[session {session.Id}] 通关 {chapter}-{index}(diff{diff}) star={starMask} " +
@@ -212,6 +218,8 @@ public sealed class ChapterHandler
 
         // 关卡进度增量推送（pf 1034 → Game.Player.OnChapterChange → MapList.ReflashLevelList）
         GameNotify.PushChapter(session, mapId, composed);
+        if (coffeeChanges.Count > 0) GameNotify.PushTaskValues(session, coffeeChanges);
+        if (girlStoryChanges.Count > 0) GameNotify.PushTaskValues(session, girlStoryChanges);
 
         // 货币增量：每种变动的货币一条 pf 1032（MoneyUpdateNtf 只有一个 Info 字段，无法批量）。
         // RewardGold/Diamond 两列即便被填上也要推，所以先并进集合再统一推，避免重复。

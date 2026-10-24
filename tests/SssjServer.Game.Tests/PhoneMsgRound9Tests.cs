@@ -30,6 +30,28 @@ public class PhoneMsgRound9Tests
     private const int BbsId = 1;
     private const int BbsNpc = 7;
 
+    [Theory]
+    [InlineData(0, 1)]
+    [InlineData(2, 2)]
+    public async Task LetterRewardCrossesLevelTenAndPersistsStoryUnlock(int prior, int expected)
+    {
+        using var h = await FeatureHarness.CreateAsync("letter-love-threshold");
+        await SendAsync(h, $"{{\"nCmd\":3,\"nMsgId\":{LetterId},\"nSelectId\":1}}");
+        var table = GirlLoveTable.Load(TestPaths.SettingDir);
+        var girl = h.Player.GetGirl(1)!;
+        girl.Level = 9;
+        girl.Exp = (uint)(table.LevelUpExp(1, 9) - 1);
+        int task = GirlLoveFeature.VarTaskId(1, GirlLoveFeature.ELevelOffset(5));
+        h.Player.SetTask(3, task, prior);
+        await SendAsync(h, $"{{\"nCmd\":7,\"nMsgId\":{LetterId}}}");
+        Assert.Equal(10u, girl.Level);
+        Assert.Equal(expected, h.Player.GetTask(3, task));
+        var saved = new PlayerStore(h.Options).Load(h.Player.Account)!;
+        Assert.Equal(expected, saved.GetTask(3, task));
+        Assert.Equal(girl.Level, saved.GetGirl(1)!.Level);
+        Assert.True(await h.WaitForPfAsync(GamePf.TaskValueSyncRsp));
+    }
+
     private static Task SendAsync(FeatureHarness h, string json)
         => h.LuaCalls.DispatchAsync(h.Session, PhoneMsgFeature.UpFunction, json);
 

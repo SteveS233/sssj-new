@@ -19,6 +19,9 @@ public sealed class GameFeatureContext
     private readonly Action<PlayerLoginHook> _onLogin;
     private readonly Action<PlayerLoginHook> _onPrepare;
     private readonly PfRouter _pf;
+    internal event Action<ClientSession, Player>? BeforeCafeDownload;
+    internal void PrepareCafeDownload(ClientSession session, Player player)
+        => BeforeCafeDownload?.Invoke(session, player);
 
     internal GameFeatureContext(
         ServerOptions options,

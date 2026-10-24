@@ -174,6 +174,7 @@ public sealed class PhoneMsgFeature : IGameFeature
 
     private GameFeatureContext _ctx = null!;
     private PhoneMsgTable _table = PhoneMsgTable.Empty;
+    private CartoonTable _cartoons = null!;
 
     /// <summary>
     /// 好感度曲线（私信/回帖领奖要加少女经验）。★ 本域自己 Load 一份而不是
@@ -192,6 +193,7 @@ public sealed class PhoneMsgFeature : IGameFeature
         _ctx = ctx;
         string dir = Path.GetFullPath(ctx.Options.SettingDirectory);
         _table = PhoneMsgTable.Load(dir);
+        _cartoons = CartoonTable.Load(dir);
         _girlLove = GirlLoveTable.Load(dir);
         _chapters = ChapterTable.Load(dir);
         ctx.MapFunction(UpFunction, OnPhoneMsg);
@@ -856,7 +858,7 @@ public sealed class PhoneMsgFeature : IGameFeature
     /// <summary>
     /// 判定一条触发是否已满足（多条件 AND）。<paramref name="why"/> 回填命中原因（写日志用）。
     ///
-    /// ★ 含无法判定的条件（类型 1 剧情、或未知类型）时返回 false —— **保守不补发**。
+    /// ★ 含无法判定的条件（缺失剧情路径、或未知类型）时返回 false —— **保守不补发**。
     /// </summary>
     private bool Satisfied(Player player, PhoneState state, PhoneEvent ev,
                            int ownerNpcId, out string why)
@@ -889,27 +891,11 @@ public sealed class PhoneMsgFeature : IGameFeature
         why = "";
         switch (c.Type)
         {
-            // 1 剧情：★★★ 第十二轮改为「剧情已读即视为满足」。
-            //
-            // 背景：客户端 CheckEvent 的类型 1 分支是**事件式**判定
-            //   （PhoneMsgLogic.lua:1956 `tbData[1] == tbEvent.LimitInfo[1]`）——
-            //   只在 CartoonData:SetIsRead 那一刻拿「刚看完的路径」比一次，错过不补；
-            //   且 SetIsRead 开头 `if self:CheckById(id) then return end` 会让
-            //   重看同一段剧情直接短路 ⇒ 补不回来。
-            //
-            // GM 全解锁账号跳过了剧情播放 ⇒ 那 177 条类型 1 触发永远不会发生。
-            // 现在 GmUnlock.ApplyCartoons 把剧情已读位域(group 39)全填 ⇒
-            // 语义上所有剧情都已看过 ⇒ 这里按「已读」认定满足，把内容补出来。
-            //
-            // ★ 判据用「位域是否已填」而不是无条件 true：非全解锁账号行为不变
-            //   （只有真看过才补）。
-            // ★★ 但**做不到「精确到某一段剧情」**：路径→id 的映射表 CartoonFileId.txt
-            //   不在任何 .u 里（取证见 GmUnlock.ApplyCartoons）⇒ 只能判「整个位域是否全开」
-            //   这一粒度。对全解锁账号来说这正是想要的语义。
+            // Resolve the exact original story bit; unrelated read stories must not
+            // unlock this event. Unknown paths stay locked rather than guessing.
             case 1:
             {
-                if (!AllCartoonsRead(player))
-                    return false;
+                if (!_cartoons.IsRead(player, c.Info)) return false;
                 why = "剧情已读";
                 return true;
             }
@@ -1039,20 +1025,6 @@ public sealed class PhoneMsgFeature : IGameFeature
 
     /// <summary>成就进度所在的任务值 group（与 <c>ActivityAchieveFeature</c> 一致）。</summary>
     private const int AchieveTaskGroup = 18;
-
-    /// <summary>
-    /// 「剧情已读位域是否已全开」—— 即 <see cref="GmUnlock.ApplyCartoons"/> 是否跑过。
-    ///
-    /// 判据取**抽样**而不是遍历 401 个 taskId：全填是一次性、整段写入的
-    /// （要么 401 个都填了，要么一个都没填），所以查首尾两个足够，且这条判定
-    /// 每条触发都会走一次、要便宜。
-    /// </summary>
-    private static bool AllCartoonsRead(Player player)
-    {
-        const int allRead = int.MaxValue;      // = 0x7FFFFFFF，与 GmUnlock.ApplyCartoons 一致
-        return (player.GetTask(GmUnlock.CartoonGroup, GmUnlock.CartoonMinTaskId) & allRead) == allRead
-            && (player.GetTask(GmUnlock.CartoonGroup, GmUnlock.CartoonMaxTaskId) & allRead) == allRead;
-    }
 
     /// <summary>
     /// 取字符串里**最后一个**整数 —— 精确复刻客户端
@@ -1348,7 +1320,9 @@ public sealed class PhoneMsgFeature : IGameFeature
             return;
         }
 
+        var unlockedStories = GirlLoveFeature.UnlockStories(_girlLove, player, (uint)npcId);
         _ctx.Store.Save(player);
+        GameNotify.PushTaskValues(session, unlockedStories);
 
         // ★ 好感度存 protobuf 不存任务值 ⇒ 必须推 pf 1030（docs/05 §27 那条教训）
         var girl = player.GetGirl((uint)npcId);

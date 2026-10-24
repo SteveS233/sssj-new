@@ -133,7 +133,9 @@ public sealed class GachaFeature : IGameFeature
 
     private GameFeatureContext _ctx = null!;
     private GachaTable _table = GachaTable.Empty;
-    private readonly Random _rng = new();
+    private readonly Random _rng;
+    public GachaFeature() => _rng = new Random();
+    internal GachaFeature(Random random) => _rng = random;
 
     public string Name => "抽卡/卡池（sFunction Lottery）";
 
@@ -160,8 +162,9 @@ public sealed class GachaFeature : IGameFeature
             return Task.CompletedTask;
         }
 
-        int poolId = ReadInt(param?["nId"], 0);
-        bool ten = ReadBool(param?["bTen"]);
+        var request = param as JsonObject;
+        int poolId = ReadInt(request?["nId"], 0);
+        bool ten = ReadBool(request?["bTen"]);
         long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
         // ★ 一个池 id 有多段档期，Get(id, now) 只返回当前生效的那一段（见 GachaTable 类注释）
@@ -202,6 +205,17 @@ public sealed class GachaFeature : IGameFeature
         }
 
         int draws = ten ? TenCount : 1;
+        if (pool.JudgeType is 3 or 4 && !ValidChoice(pool,
+            player.GetTask(TaskGroup, TaskCardCustomChoice + pool.Id)))
+        {
+            Reply(session, FnLottery, new JsonObject { ["err"] = ErrNotExists });
+            return Task.CompletedTask;
+        }
+        if (pool.ProtectUpNum > 0 && !pool.Cards.Values.Any(c => c.Star == 4 && c.UpFlag == 1))
+        {
+            Reply(session, FnLottery, new JsonObject { ["err"] = ErrNotExists });
+            return Task.CompletedTask;
+        }
 
         // ---- 扣费（GachaCommon:JudgeCurrency 的顺序：道具 → 免费钻 → 免费钻+付费钻）----
         var spend = TrySpend(player, pool, ten);
@@ -288,8 +302,8 @@ public sealed class GachaFeature : IGameFeature
     // =================================================================
 
     /// <summary>一次抽取的结果。</summary>
-    private sealed record DrawResult(GachaCard Card, bool ByProtect, bool FirstGet,
-                                     int Times, int TotalTimes);
+    internal sealed record DrawResult(GachaCard Card, bool ByProtect, bool FirstGet,
+                                     int Times, int TotalTimes, bool IsUp, int UpTimes);
 
     /// <summary>
     /// 抽一次并就地更新 group 15 的计数。
@@ -303,7 +317,7 @@ public sealed class GachaFeature : IGameFeature
     ///   <item>出 4★ ⇒ 保底计数清零（客户端靠「差值 != 抽数」判保底演出）。</item>
     /// </list>
     /// </summary>
-    private DrawResult DrawOne(Player player, GachaPool pool, CardStarSeedRow? seed)
+    internal DrawResult DrawOne(Player player, GachaPool pool, CardStarSeedRow? seed)
     {
         int protectKey = TaskProtectBegin + pool.Id;
         int prePoolKey = TaskPrePoolBegin + pool.Id;
@@ -317,11 +331,19 @@ public sealed class GachaFeature : IGameFeature
         player.SetTask(TaskGroup, TaskTotal, total);
 
         bool byProtect = pool.ProtectNum > 0 && protectCount >= pool.ProtectNum;
+        int upKey = TaskProtectUpBegin + pool.Id;
+        int upCount = player.GetTask(TaskGroup, upKey);
+        bool upActive = pool.ProtectUpNum > 0 && upCount != -1;
+        int nextUp = upActive ? Math.Max(0, upCount) + 1 : upCount;
+        bool byUpProtect = upActive && nextUp >= pool.ProtectUpNum;
 
         // times 传给 GetStarRate 的口径是「已抽次数 + 1」（GachaCommon.lua:284），
         // 而这里 protectCount 已经含本次，所以直接用它。
-        int star = byProtect ? 4 : PickStar(pool, seed, protectCount);
-        var card = PickCard(pool, star);
+        int star = byProtect || byUpProtect ? 4 : PickStar(pool, seed, protectCount);
+        int choice = player.GetTask(TaskGroup, TaskCardCustomChoice + pool.Id);
+        var card = PickCard(pool, star, choice, byUpProtect);
+        bool isUp = IsUpCard(pool, card, choice);
+        if (upActive) player.SetTask(TaskGroup, upKey, isUp ? -1 : nextUp);
 
         if (card.Star >= 4)
             player.SetTask(TaskGroup, protectKey, 0);   // 出 4★ 清零保底
@@ -329,7 +351,8 @@ public sealed class GachaFeature : IGameFeature
         bool firstGet = player.Items.All(i => !(i.Genre == (uint)card.G && i.Detail == (uint)card.D
                                              && i.Particular == (uint)card.P && i.Level == (uint)card.L));
 
-        return new DrawResult(card, byProtect, firstGet, poolTimes, total);
+        return new DrawResult(card, byProtect, firstGet, protectCount, poolTimes, isUp,
+            byUpProtect ? nextUp : 0);
     }
 
     /// <summary>
@@ -377,28 +400,59 @@ public sealed class GachaFeature : IGameFeature
     }
 
     /// <summary>在指定星级内按归一化概率抽一张卡。星级内没有卡时退化到全池。</summary>
-    private GachaCard PickCard(GachaPool pool, int star)
+    internal static bool ValidChoice(GachaPool pool, int value)
     {
-        var candidates = pool.Cards.Values.Where(c => c.Star == star).ToList();
+        int first = value & 0xFFFF, second = (int)((uint)value >> 16);
+        bool Eligible(int id) => id > 0 && pool.Cards.TryGetValue(id, out var card)
+            && card.Star == 4 && (pool.JudgeType == 4 || card.UpFlag == 1);
+        return pool.JudgeType == 4 ? second == 0 && Eligible(first)
+            : pool.JudgeType == 3 && first != second && Eligible(first) && Eligible(second);
+    }
+
+    // GachaCommon.SetCustomUp: selected cards each .25; remaining four-stars share .5.
+    internal static List<(GachaCard Card, double Weight)> CardWeights(GachaPool pool, int star, int choice)
+    {
+        if (pool.JudgeType == 4 && ValidChoice(pool, choice))
+            return [(pool.Cards[choice], 1)];
+        var cards = pool.Cards.Values.Where(c => c.Star == star).ToList();
+        if (pool.JudgeType == 3 && star == 4 && ValidChoice(pool, choice))
+        {
+            int first = choice & 0xFFFF, second = (int)((uint)choice >> 16);
+            int others = cards.Count - 2;
+            return cards.Select(c => (c, c.Id == first || c.Id == second ? .25
+                : others > 0 ? .5 / others : 0)).ToList();
+        }
+        return cards.Select(c => (c, (double)Math.Max(0, c.RawRate))).ToList();
+    }
+
+    private static bool IsUpCard(GachaPool pool, GachaCard card, int choice)
+        => card.Star == 4 && (pool.JudgeType == 3
+            ? card.Id == (choice & 0xFFFF) || card.Id == (int)((uint)choice >> 16)
+            : card.UpFlag == 1);
+
+    private GachaCard PickCard(GachaPool pool, int star, int choice, bool upOnly = false)
+    {
+        var candidates = CardWeights(pool, star, choice);
+        if (upOnly) candidates = candidates.Where(c => IsUpCard(pool, c.Card, choice)).ToList();
         if (candidates.Count == 0)
         {
             Log.Warn($"[gacha] 池 {pool.Id} 里没有 {star}★ 的卡，退化到全池随机");
-            candidates = pool.Cards.Values.ToList();
+            candidates = pool.Cards.Values.Select(c => (c, (double)Math.Max(0, c.RawRate))).ToList();
         }
 
-        int sum = candidates.Sum(c => Math.Max(0, c.RawRate));
+        double sum = candidates.Sum(c => c.Weight);
         if (sum <= 0)
-            return candidates[_rng.Next(candidates.Count)];
+            return candidates[_rng.Next(candidates.Count)].Card;
 
-        int roll = _rng.Next(sum);
-        int acc = 0;
+        double roll = _rng.NextDouble() * sum;
+        double acc = 0;
         foreach (var c in candidates)
         {
-            acc += Math.Max(0, c.RawRate);
+            acc += c.Weight;
             if (roll < acc)
-                return c;
+                return c.Card;
         }
-        return candidates[^1];
+        return candidates[^1].Card;
     }
 
     // =================================================================
@@ -425,7 +479,7 @@ public sealed class GachaFeature : IGameFeature
     ///
     /// <c>CashType</c> 0/1 用道具（<c>CostOne</c>/<c>CostTen</c> 是四元组），
     /// 其它值直接扣 id == <c>CashType</c> 的货币。
-    /// <c>CanUseFreeDiamond == 0</c> 时不许用免费钻（该列本实现读不到就按「允许」）。
+    /// <c>CanUseFreeDiamond == 0</c> 时不许用免费钻。
     /// </summary>
     private SpendResult TrySpend(Player player, GachaPool pool, bool ten)
     {
@@ -462,11 +516,36 @@ public sealed class GachaFeature : IGameFeature
                 return r;
             }
 
-            // CashType==0：折算成钻石。ExchangeRate 列未接（现网多为空），按 1:1 的抽数计价，
-            // 这里用「单抽/十连的钻石价」缺省值 —— 现网 CashType==0 的池没有钻石价，
-            // 所以直接判失败并给出可读原因（不猜价格）。
-            r.Reason = $"道具 {_ctx.ItemTemplates.NameOf(g, d, p, l)} 不足（有 " +
-                       $"{stack?.Count ?? 0}，需 {need}），且该池未配置钻石价（ExchangeRate 未取证）";
+            // UI_Gacha.lua:2215: exchangeRate * (ten ? 10 : 1),
+            // GachaCommon.JudgeCurrency: free first, then paid covers the remainder.
+            long price = (long)pool.ExchangeRate * (ten ? TenCount : 1);
+            if (price <= 0 || price > int.MaxValue)
+            {
+                r.Reason = "无有效地球币兑换价格";
+                return r;
+            }
+            int free = pool.CanUseFreeDiamond ? Math.Max(0, player.GetMoney(MoneyType.FreeDiamond)) : 0;
+            int paid = Math.Max(0, player.GetMoney(MoneyType.PayDiamond));
+            if ((long)free + paid < price)
+            {
+                r.Reason = $"地球币不足（需 {price}）";
+                return r;
+            }
+            int useFree = (int)Math.Min(free, price);
+            int usePaid = (int)price - useFree;
+            if (useFree > 0)
+            {
+                player.SetMoney(MoneyType.FreeDiamond, free - useFree);
+                r.ChangedMoney.Add(MoneyType.FreeDiamond);
+                r.Note($"免费地球币×{useFree}");
+            }
+            if (usePaid > 0)
+            {
+                player.SetMoney(MoneyType.PayDiamond, paid - usePaid);
+                r.ChangedMoney.Add(MoneyType.PayDiamond);
+                r.Note($"付费地球币×{usePaid}");
+            }
+            r.Ok = true;
             return r;
         }
 
@@ -517,10 +596,10 @@ public sealed class GachaFeature : IGameFeature
                 ["nTimes"] = r.Times,
                 ["nTotalTimes"] = r.TotalTimes,   // 条件必填，无条件填更安全
             };
-            if (r.Card.UpFlag == 1)
+            if (r.IsUp)
             {
                 item["isUp"] = true;
-                item["nUpTimes"] = player.GetTask(TaskGroup, TaskProtectUpBegin + pool.Id);
+                item["nUpTimes"] = r.UpTimes;
             }
             arr.Add(item);
         }
@@ -533,6 +612,7 @@ public sealed class GachaFeature : IGameFeature
         foreach (int taskId in new[]
                  {
                      TaskTotal, TaskProtectBegin + pool.Id, TaskPrePoolBegin + pool.Id,
+                     TaskProtectUpBegin + pool.Id,
                      TaskCardSingle, TaskCardMul,
                  })
         {
@@ -586,8 +666,9 @@ public sealed class GachaFeature : IGameFeature
         if (session.Tag is not Player player)
             return Task.CompletedTask;
 
-        int poolId = ReadInt(param?["nId"], 0);
-        var items = param?["tbItems"] as JsonArray;
+        var request = param as JsonObject;
+        int poolId = ReadInt(request?["nId"], 0);
+        var items = request?["tbItems"] as JsonArray;
         int card1 = items is { Count: > 0 } ? ReadInt(items[0], 0) : 0;
         int card2 = items is { Count: > 1 } ? ReadInt(items[1], 0) : 0;
 
@@ -595,7 +676,14 @@ public sealed class GachaFeature : IGameFeature
         int choiceKey = TaskCardCustomChoice + poolId;
         int timeKey = TaskCardCustomTime + poolId;
 
-        if (choiceKey > 0xFFFF || timeKey > 0xFFFF)
+        var pool = _table.Get(poolId, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        if (pool is null || items?.Count != (pool.JudgeType == 4 ? 1 : 2)
+            || card1 is <= 0 or > 0xFFFF || card2 is < 0 or > 0xFFFF
+            || !ValidChoice(pool, value) || pool.SetUpNum <= 0
+            || player.GetTask(TaskGroup, timeKey) >= pool.SetUpNum)
+            return Task.CompletedTask;
+
+        if (choiceKey <= 0 || timeKey <= 0 || choiceKey > 0xFFFF || timeKey > 0xFFFF)
         {
             // Player.ComposeTaskId 只留低 16 位
             Log.Warn($"[session {session.Id}] SetCardCustomUp nId={poolId} 的任务键越界（{choiceKey}/{timeKey}），忽略");

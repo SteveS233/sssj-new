@@ -108,7 +108,11 @@ public sealed class FormationHandler
     /// <summary>把 Player.Formation 转成 proto 的 FormationInfo（含副卡/武器/符文槽）。</summary>
     public static FormationInfo BuildFormationInfo(Formation formation)
     {
-        var fi = new FormationInfo { Id = formation.Id, Title = formation.Title };
+        var fi = new FormationInfo
+        {
+            Id = formation.Id,
+            Title = string.IsNullOrWhiteSpace(formation.Title) ? $"队伍 {formation.Id}" : formation.Title,
+        };
         foreach (var slot in formation.Slots)
         {
             var card = new FightCard

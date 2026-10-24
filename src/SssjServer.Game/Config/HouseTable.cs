@@ -113,6 +113,8 @@ public sealed class HouseItemRow
     /// <c>Template == null</c> 时返回 0（有 nil 保护）。
     /// </summary>
     public int Type { get; init; }
+    public string ThemeType { get; init; } = "";
+    public int OwnMax { get; init; }
 
     /// <summary>
     /// 父容器节点的模板 id（<c>Parent</c> 列，表头中文「父节点(固定物件使用)」）。
@@ -531,6 +533,8 @@ public sealed class HouseTable
                 {
                     Id = id,
                     Type = items.Int(row, "Type", 0),
+                    ThemeType = items.Str(row, "ThemeType"),
+                    OwnMax = items.Int(row, "OwnMax", 0),
                     Parent = (uint)Math.Max(0, items.Int(row, "Parent", 0)),
                     DicPlace = items.Int(row, "DicPlace", 0),
                     DicArea = ParseUIntList(items.Str(row, "DicArea")),

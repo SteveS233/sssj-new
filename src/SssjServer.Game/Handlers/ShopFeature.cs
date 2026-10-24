@@ -452,6 +452,7 @@ public sealed class ShopFeature : IGameFeature
                     ChangedMoney.Add(id);
             }
             _parts.AddRange(other._parts);
+            Granted.Absorb(other.Granted);
         }
 
         public string Describe()
@@ -536,6 +537,16 @@ public sealed class ShopFeature : IGameFeature
         int unit = goods.UnitPrice(priceIdx, entry.Discount);
         int total = unit * buyNum;
 
+        long grantCount = (long)goods.GoodsNum * buyNum;
+        if (grantCount <= 0 || grantCount > int.MaxValue
+            || !_ctx.Rewards.CanReceiveFurniture(player, (uint)goods.G, (uint)goods.D,
+                (uint)goods.P, (uint)goods.L, (int)grantCount))
+        {
+            Log.Warn($"[session {session.Id}] Furniture purchase exceeds ownership/storage capacity or has invalid configuration");
+            tipKey = TipBadGoodsId;
+            return null;
+        }
+
         var outcome = new BuyOutcome { BuyNum = buyNum, TotalPrice = total, MoneyId = goods.MoneyType };
         if (total > 0 && !TrySpendMoney(player, goods.MoneyType, total, outcome.ChangedMoney))
         {
@@ -593,6 +604,10 @@ public sealed class ShopFeature : IGameFeature
         var state = ShopStateOf(player, shopId);      // 只取一次：40001 有 499 件，别在循环里反复查
         var list = new JsonArray();
 
+        var furnitureCounts = shop?.IsCafeShop == true && _ctx.Rewards.Furniture is { } furnitureTable
+            ? HouseFeature.ReadOrCreate(player, furnitureTable).Furniture.GroupBy(f => f.TemplateId)
+                .ToDictionary(g => g.Key, g => g.Count()) : null;
+
         foreach (var e in shelf)
         {
             var goods = _table.GetGoods(e.GoodsId);
@@ -612,6 +627,11 @@ public sealed class ShopFeature : IGameFeature
                 ["totalbuynum"] = CountIn(state, ShopLimitKind.Total, e.GoodsId),
                 ["shelfbuynum"] = CountIn(state, ShopLimitKind.Shelf, e.GoodsId),
             };
+            if (furnitureCounts is not null
+                && _ctx.Rewards.IsCafeFurniture((uint)goods.G, (uint)goods.D, (uint)goods.P, (uint)goods.L)
+                && int.TryParse(_ctx.Rewards.Templates.Get((uint)goods.G, (uint)goods.D,
+                    (uint)goods.P, (uint)goods.L)?.ExtParam1, out int furnitureId))
+                item["totalbuynum"] = furnitureCounts.GetValueOrDefault(furnitureId);
             // pos = Group 号。只有社团商店 20006 会读它（GoodsLogicC.lua:227..241），
             // 但那里的默认值是「锁住」：pos 为 nil 时 bClublock 保持 true，整店只显示 1 件锁着的商品。
             if (e.Pos.HasValue)
