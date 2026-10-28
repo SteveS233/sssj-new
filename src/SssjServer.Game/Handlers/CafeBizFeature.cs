@@ -241,6 +241,7 @@ public sealed class CafeBizFeature : IGameFeature
     private GameFeatureContext _ctx = null!;
     private GirlMoodRecovery _mood = null!;
     private CafeTable _cafe = CafeTable.Empty;
+    private HouseTable _house = HouseTable.Empty;
 
     public string Name => "咖啡馆经营（LuaCall 113 排班 / 114 座位 / 115 顾客 / 119 咖啡）";
 
@@ -249,6 +250,7 @@ public sealed class CafeBizFeature : IGameFeature
         _ctx = ctx;
         _mood = new GirlMoodRecovery(Path.GetFullPath(ctx.Options.SettingDirectory));
         _cafe = CafeTable.Load(Path.GetFullPath(ctx.Options.SettingDirectory));
+        _house = HouseTable.Load(Path.GetFullPath(ctx.Options.SettingDirectory));
 
         ctx.OnPlayerPrepare((session, player) => RefreshCoffeeConditions(player));
         ctx.BeforeCafeDownload += SettleElapsedSeats;
@@ -432,12 +434,14 @@ public sealed class CafeBizFeature : IGameFeature
     // Settle the old guest/assignment state before mutating it, then establish the
     // new mode's clock. Guest arrival/departure cannot retroactively charge time.
     private void WriteMoodState(ClientSession session, Player player, CafeFeature.CafeState state,
-        CafeFeature.CafeContent? content = null)
+        CafeFeature.CafeContent? content = null, bool notify = true)
     {
         long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        _mood.Refresh(session, player, now);
+        _ctx.PledgeTimes.Refresh(player, now);
+        _mood.Refresh(session, player, now, notify);
         CafeFeature.WriteState(player, state, content);
-        _mood.Refresh(session, player, now);
+        _mood.Refresh(session, player, now, notify);
+        _ctx.PledgeTimes.Refresh(player, now);
     }
 
     // ================= 114 座位上报 =================
@@ -512,8 +516,36 @@ public sealed class CafeBizFeature : IGameFeature
     /// </summary>
     private Task OnSetWaiterList(ClientSession session, int cmd, JsonNode? param)
     {
+        if (session.Tag is not Player player) return Task.CompletedTask;
+        lock (player)
+        {
+            void ReplyCurrent()
+            {
+                var state = CafeFeature.ReadState(player, _cafe);
+                var content = CafeFeature.ReadContent(player, state, _cafe, CafeFeature.CafeDayIndex(DateTimeOffset.UtcNow));
+                _ctx.LuaCalls.CallClient(session, cmd, CafeFeature.BuildRoomGirlsList(content.AreaGirls));
+            }
+            try { _ctx.PledgeTimes.SaveRefresh(_ctx.Store, player, DateTimeOffset.UtcNow.ToUnixTimeSeconds()); }
+            catch (Exception) { ReplyCurrent(); return Task.CompletedTask; }
+            var before = new ChallengeMutationSnapshot(player);
+            try { return SetWaiterListLocked(session, cmd, param); }
+            catch (Exception error)
+            {
+                before.Restore(player);
+                Log.Warn($"[cafe] 排班保存失败，排班、计时和心情已回滚：{error.Message}");
+                ReplyCurrent();
+                return Task.CompletedTask;
+            }
+        }
+    }
+
+    private Task SetWaiterListLocked(ClientSession session, int cmd, JsonNode? param)
+    {
         if (session.Tag is not Player player)
             return Task.CompletedTask;
+
+        var oldMood = player.Girls.ToDictionary(g => g.Girlid, g => g.Moodvalue);
+        var oldClocks = player.Tasks.Where(p => p.Key >> 16 == 41).ToDictionary(p => p.Key, p => p.Value);
 
         var state = CafeFeature.ReadState(player, _cafe);
         var utcNow = DateTimeOffset.UtcNow;
@@ -557,8 +589,12 @@ public sealed class CafeBizFeature : IGameFeature
         areas = CafeFeature.ReadAreaGirls(CafeFeature.BuildRoomGirlsList(areas), player,
             _cafe.LevelRowFor(state.Level), session.Id);
         var next = CloneWith(content, areaGirls: areas);
-        WriteMoodState(session, player, state, next);
-        _ctx.Store.Save(player);
+        WriteMoodState(session, player, state, next, notify: false);
+        _ctx.Store.SaveRequired(player);
+        foreach (var girl in player.Girls)
+            if (oldMood.GetValueOrDefault(girl.Girlid) != girl.Moodvalue) GameNotify.PushGirl(session, girl);
+        GameNotify.PushTaskValues(session, player.Tasks.Where(p => p.Key >> 16 == 41
+            && oldClocks.GetValueOrDefault(p.Key) != p.Value));
 
         // ★ 回包必须是三项的数组的数组，内层每个少女是 [girlId, modelId]
         var reply = new JsonArray();
@@ -834,7 +870,13 @@ public sealed class CafeBizFeature : IGameFeature
         // ---- 通过：扣钱、写等级 ----
         if (row.NeedGold > 0)
             player.AddMoney(GoldMoneyId, -row.NeedGold);
-        WriteMoodState(session, player, state with { Level = next });
+        var inventory = HouseFeature.ReadOrCreate(player, _house, session.Id);
+        var upgraded = state with
+        {
+            Level = next,
+            Comfort = HouseComfort.Calculate(_house, inventory, next, _cafe.MaxComfort)
+        };
+        WriteMoodState(session, player, upgraded);
         _ctx.Store.Save(player);
 
         Log.Info($"[session {session.Id}] 咖啡馆升级 lv={cur} → {next}" +
@@ -844,8 +886,8 @@ public sealed class CafeBizFeature : IGameFeature
         // ★ 先推货币变更（pf 1029），再回业务包 —— 与商店/养成域同一条时序规矩
         GameNotify.PushMoney(session, player, GoldMoneyId);
 
-        // ★ 成功回包只带 level，绝不带 nError（真值判断）
-        Reply(session, cmd, new JsonObject { ["level"] = next });
+        // LuaCall.lua's level-up callback applies comfort, including zero.
+        Reply(session, cmd, new JsonObject { ["level"] = next, ["comfort"] = upgraded.Comfort });
         return Task.CompletedTask;
     }
 

@@ -92,8 +92,15 @@ public class GachaFeatureTests
         // 每个 id 最多出现一次（GetCurPools 的口径）
         Assert.Equal(open.Count, open.Distinct().Count());
         // ★ 现网当前开放的就是这 4 个
-        Assert.Equal(new[] { 1, 66, 77, 666 }, open.OrderBy(x => x).ToArray());
-        Assert.DoesNotContain(ExpiredPoolId, open);
+        var plan = GachaRotation.For(TestPaths.SettingDir).Read();
+        if (plan.Enabled)
+            Assert.Equal(plan.Entries.Where(e => e.Type == 1 && e.Start <= now && now < e.End)
+                .Select(e => e.Id).Distinct().OrderBy(x => x), open.OrderBy(x => x));
+        else
+        {
+            Assert.Equal(new[] { 1, 66, 77, 666 }, open.OrderBy(x => x).ToArray());
+            Assert.DoesNotContain(ExpiredPoolId, open);
+        }
 
         // 池 1 是普通池，有单抽也有十连
         var normal = table.Get(NormalPoolId, now)!;
@@ -347,8 +354,8 @@ public class GachaFeatureTests
         Assert.Equal(1, gdpl[0]!.GetValue<int>());        // 角色卡 genre 恒 1
 
         Assert.NotNull(item["nId"]);
-        // ★ bHasCard 必须显式 true（只有 false 才播抽卡剧情）
-        Assert.True(item["bHasCard"]!.GetValue<bool>());
+        // 显式按首次/重复状态控制原版抽卡剧情分支。
+        Assert.Equal(!item["bFirstGet"]!.GetValue<bool>(), item["bHasCard"]!.GetValue<bool>());
         Assert.NotNull(item["bFirstGet"]);
         Assert.NotNull(item["nTimes"]);
         // ★ nTotalTimes 条件必填 —— UpBoxNum>0 且 RotateVersion>0 时客户端会 % 它

@@ -158,7 +158,7 @@ public sealed class WeaponGachaPool
     /// <summary>免费抽是否可用（<c>WeaponForge:CanFree</c>，<c>WeaponForge.lua:160..175</c>）。</summary>
     public bool FreeAvailableAt(long now, int usedFree)
     {
-        if (FreeType == 0 || FreeCount <= 0)
+        if (FreeType is not (1 or 2) || FreeCount <= 0 || usedFree < 0)
             return false;
         // nFreeStart/nFreeEnd 都配了才判时段（Lua 侧 `if tbData.nFreeStart and tbData.nFreeEnd then`）
         if (FreeStart > 0 && FreeEnd > 0 && (now < FreeStart || now > FreeEnd))

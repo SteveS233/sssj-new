@@ -1,4 +1,4 @@
-using SssjServer.Core;
+﻿using SssjServer.Core;
 using SssjServer.Game;
 using SssjServer.Protocol;
 using SssjServer.Protocol.GsProto;

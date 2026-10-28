@@ -106,6 +106,7 @@ public sealed class GirlTrainFeature : IGameFeature
     public const int ErrGeneric = 1;
 
     private GameFeatureContext _ctx = null!;
+    private PledgeTable _pledge = PledgeTable.Empty;
     private GirlMoodRecovery _mood = null!;
     private TrainTable _train = TrainTable.Empty;
     private HouseTable _trainHouse = HouseTable.Empty;
@@ -120,6 +121,7 @@ public sealed class GirlTrainFeature : IGameFeature
     public void Install(GameFeatureContext ctx)
     {
         _ctx = ctx;
+        _pledge = PledgeTable.Load(Path.GetFullPath(ctx.Options.SettingDirectory));
         _mood = new GirlMoodRecovery(Path.GetFullPath(ctx.Options.SettingDirectory));
         _train = TrainTable.Load(Path.GetFullPath(ctx.Options.SettingDirectory));
         _trainHouse = HouseTable.Load(Path.GetFullPath(ctx.Options.SettingDirectory));
@@ -154,7 +156,7 @@ public sealed class GirlTrainFeature : IGameFeature
             return Task.CompletedTask;
 
         string sCmd = param?["sCmd"]?.ToString() ?? "";
-        return sCmd switch
+        lock (player) return sCmd switch
         {
             CmdAddTrainPos => OnAddTrainPos(session, player),
             CmdStartTrain => OnStartTrain(session, player, param),
@@ -284,10 +286,12 @@ public sealed class GirlTrainFeature : IGameFeature
         int seconds = row.Time;
         long endAt = DateTimeOffset.UtcNow.ToUnixTimeSeconds() + seconds;
 
+        _ctx.PledgeTimes.Refresh(player, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
         _mood.Refresh(session, player, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
         SetVar(session, player, girlId, VarTrainPos, pos);
         SetVar(session, player, girlId, VarTrainTime, (int)endAt);
         SetVar(session, player, girlId, VarTrainOutId, outdoorId);
+        _ctx.PledgeTimes.Refresh(player, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
         _mood.Refresh(session, player, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
 
         Log.Info($"[session {session.Id}] GirlLogic/StartTrain 少女 {girlId} → pos={pos}" +
@@ -330,15 +334,22 @@ public sealed class GirlTrainFeature : IGameFeature
     /// <summary>打断特训：清属性、不发奖。</summary>
     private Task OnInterruptTrain(ClientSession session, Player player, JsonNode? param)
     {
-        uint girlId = (uint)ReadInt(param?["nId"]);
+        if (!GachaRequestLimits.TryInteger(param?["nId"], out int requestedGirl) || requestedGirl <= 0)
+        {
+            Fail(session, CmdInterruptTrain, ErrGeneric);
+            return Task.CompletedTask;
+        }
+        uint girlId = (uint)requestedGirl;
         if (girlId == 0 || GetVar(player, girlId, VarTrainPos) <= 0)
         {
             Fail(session, CmdInterruptTrain, ErrGeneric);
             return Task.CompletedTask;
         }
 
+        _ctx.PledgeTimes.Refresh(player, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
         _mood.Refresh(session, player, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
         ClearTrain(session, player, girlId);
+        _ctx.PledgeTimes.Refresh(player, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
         _mood.Refresh(session, player, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
         _ctx.Store.Save(player);
         Ok(session, CmdInterruptTrain, new JsonObject { ["nId"] = girlId });
@@ -353,7 +364,12 @@ public sealed class GirlTrainFeature : IGameFeature
     /// </summary>
     private Task OnEndTrain(ClientSession session, Player player, JsonNode? param)
     {
-        uint girlId = (uint)ReadInt(param?["nId"]);
+        if (!GachaRequestLimits.TryInteger(param?["nId"], out int requestedGirl) || requestedGirl <= 0)
+        {
+            Fail(session, CmdEndTrain, ErrGeneric);
+            return Task.CompletedTask;
+        }
+        uint girlId = (uint)requestedGirl;
         int pos = girlId == 0 ? 0 : GetVar(player, girlId, VarTrainPos);
         if (pos <= 0)
         {
@@ -397,12 +413,17 @@ public sealed class GirlTrainFeature : IGameFeature
         }
         var unlocked = GirlLoveFeature.UnlockStories(_headTouchLove, player, girlId);
         var granted = _ctx.Rewards.Grant(player, reward.PlayerAwards, RewardSource.Extra);
+        _ctx.PledgeTimes.Refresh(player, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
         _mood.Refresh(session, player, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        var actionAchievements = GirlActionAchievements.Record(_headTouchMissions, player, girlId, row.Id);
+        PledgeFeature.RecordAction(_pledge, player, (int)girlId, "Training", 1, row.Id);
         ClearTrain(session, player, girlId);
+        _ctx.PledgeTimes.Refresh(player, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
         _mood.Refresh(session, player, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
         _ctx.Store.Save(player);
         GameNotify.PushGirl(session, girl);
         GameNotify.PushTaskValues(session, unlocked);
+        GameNotify.PushTaskValues(session, actionAchievements);
         GameNotify.PushRewards(session, player, granted);
         var money = reward.PlayerAwards.FirstOrDefault(a => a.Length >= 5) ?? new[] { 0, 0, 0, 0, 0 };
         var reply = new JsonObject
@@ -461,8 +482,18 @@ public sealed class GirlTrainFeature : IGameFeature
     /// </summary>
     private Task OnHeadTouched(ClientSession session, Player player, JsonNode? param)
     {
-        uint girlId = (uint)ReadInt(param?["nId"]);
-        int source = ReadInt(param?["nType"]);
+        if (!GachaRequestLimits.TryInteger(param?["nId"], out int requestedGirl) || requestedGirl <= 0)
+        {
+            Fail(session, CmdHeadTouched, ErrGeneric);
+            return Task.CompletedTask;
+        }
+        uint girlId = (uint)requestedGirl;
+        int source = 0;
+        if (param?["nType"] is { } sourceNode && !GachaRequestLimits.TryInteger(sourceNode, out source))
+        {
+            Fail(session, CmdHeadTouched, ErrGeneric);
+            return Task.CompletedTask;
+        }
         if (player.GetGirl(girlId) is null || source < 0 || source > 2)
         {
             Fail(session, CmdHeadTouched, ErrGeneric);
@@ -484,7 +515,8 @@ public sealed class GirlTrainFeature : IGameFeature
         player.SetTask(HeadTouchGroup, HeadTouchCount, count - 1);
         if (player.GetTask(HeadTouchGroup, HeadTouchTime) == 0)
             player.SetTask(HeadTouchGroup, HeadTouchTime, (int)now);
-        var achievements = RecordHeadTouchAchievements(_headTouchMissions, player);
+        PledgeFeature.RecordAction(_pledge, player, (int)girlId, "TouchHead");
+        var achievements = RecordHeadTouchAchievements(_headTouchMissions, player, girlId);
         var unlockedStories = GirlLoveFeature.UnlockStories(_headTouchLove, player, girlId);
         _ctx.Store.Save(player);
         PushHeadTouches(session, player);
@@ -505,21 +537,8 @@ public sealed class GirlTrainFeature : IGameFeature
     }
 
     /// <summary>Achievement type 15 counts completed head touches, shared across girls.</summary>
-    internal static List<KeyValuePair<uint, int>> RecordHeadTouchAchievements(MissionTable missions, Player player)
-    {
-        var changes = new List<KeyValuePair<uint, int>>();
-        foreach (var mission in missions.Achieve.Values.Where(m => m.AchieveType == 15))
-        {
-            int oldValue = player.GetTask(mission.Group, mission.Id);
-            int progress = MissionFeature.ProgressOf(oldValue);
-            int next = MissionFeature.ComposeTaskValue(
-                (int)Math.Min(0x3FFFFFFFL, (long)progress + 1), MissionFeature.ClaimedOf(oldValue));
-            if (next == oldValue) continue;
-            player.SetTask(mission.Group, mission.Id, next);
-            changes.Add(new KeyValuePair<uint, int>(Player.ComposeTaskId(mission.Group, mission.Id), next));
-        }
-        return changes;
-    }
+    internal static List<KeyValuePair<uint, int>> RecordHeadTouchAchievements(MissionTable missions, Player player, uint girlId = 0)
+        => GirlActionAchievements.Record(missions, player, girlId, null);
 
     private static void PushHeadTouches(ClientSession session, Player player)
         => GameNotify.PushTaskValues(session, new[]

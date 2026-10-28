@@ -90,12 +90,16 @@ public sealed partial class HouseFeature
                 || row.Type < 100 || _table.IsPoolBlockedTemplate(row.Id)
                 || !_table.IsAllowedParent(row.Id, pose.ParentTemplateId)
                 || !_table.Items.TryGetValue((int)pose.ParentTemplateId, out var parent)
+                || !HousePoseLimits.Valid(parent, pose.PosX, pose.PosY, pose.Rotate, row)
                 || (parent.DicPlace != 0 && parent.DicPlace != theme.Roomtype)
                 || !available.TryGetValue(pose.TemplateId, out int count) || count <= 0)
                 return false;
             available[pose.TemplateId]--;
         }
-        return true;
+        var layout = new HouseState { Furniture = theme.Poses.Select((p, i) => new HouseFurniture(
+            (uint)(HouseTable.MinPlayerObjId + i), (int)p.TemplateId, (int)theme.Roomtype,
+            p.ParentTemplateId, p.PosX, p.PosY, p.Rotate, 0, 0)).ToList() };
+        return HouseCollisionLimits.NoWorse(_table, new HouseState(), layout);
     }
 
     private bool UpdatePlans(Player player, HouseState state, UpdateHouseReq req,

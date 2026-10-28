@@ -336,6 +336,7 @@ public sealed partial class HouseFeature : IGameFeature
     private HouseTable _table = HouseTable.Empty;
     private CafeTable _cafe = CafeTable.Empty;
     private ShopTable _themeShop = ShopTable.Empty;
+    private CafeComfortSync _comfort = null!;
     private HousePlacementLimits? _placementLimits;
 
     public string Name => "家园/家具摆设(pf 1048)";
@@ -359,6 +360,7 @@ public sealed partial class HouseFeature : IGameFeature
     public void Install(GameFeatureContext ctx)
     {
         _ctx = ctx;
+        _comfort = new CafeComfortSync(ctx);
         _table = HouseTable.Load(Path.GetFullPath(ctx.Options.SettingDirectory));
         _placementLimits = new HousePlacementLimits(Path.GetFullPath(ctx.Options.SettingDirectory));
 
@@ -440,9 +442,11 @@ public sealed partial class HouseFeature : IGameFeature
         }
         owned.Add(themeId);
         WriteOwnedThemes(player, owned);
+        bool comfortChanged = granted.ChangedFurniture.Count > 0 && _comfort.Refresh(session, player);
         _ctx!.Store.Save(player);
         GameNotify.PushMoney(session, player, changedMoney);
         GameNotify.PushRewards(session, player, granted);
+        _comfort.Push(session, player, comfortChanged);
         Log.Info($"[session {session.Id}] Theme {themeId}: missing furniture added to storage, existing layout preserved");
         // ★★ 裸字符串，不是对象
         _ctx.LuaCalls.CallClient(session, cmd, BuyThemeOk);
@@ -577,6 +581,7 @@ public sealed partial class HouseFeature : IGameFeature
         if (income > 0)
             player.AddMoney(GoldMoneyId, (int)income);
         WriteState(player, new HouseState { Furniture = keep, NextObjId = state.NextObjId });
+        bool comfortChanged = _comfort.Refresh(session, player);
         _ctx!.Store.Save(player);
 
         Log.Info($"[session {session.Id}] 卖家具 {sold.Count} 件（objId {string.Join(',', sold)}）：" +
@@ -588,7 +593,10 @@ public sealed partial class HouseFeature : IGameFeature
         var back = new JsonArray();
         foreach (uint id in sold)
             back.Add(id);
-        _ctx.LuaCalls.CallClient(session, cmd, new JsonObject { ["objIds"] = back });
+        // UI_CafeStore.OnRecover reads singular objId, despite LuaCall.lua's
+        // old comment spelling it objIds. Keep the legacy field for compatibility.
+        _ctx.LuaCalls.CallClient(session, cmd, new JsonObject { ["objIds"] = back, ["objId"] = back.DeepClone() });
+        _comfort.Push(session, player, comfortChanged);
         return Task.CompletedTask;
     }
 
@@ -1029,6 +1037,7 @@ public sealed partial class HouseFeature : IGameFeature
                       && change.ParentId != 0
                       && _table.IsAllowedParent(owned.TemplateId, change.ParentId)
                       && _table.Items.TryGetValue((int)change.ParentId, out var parent)
+                      && HousePoseLimits.Valid(parent, pose.PosX, pose.PosY, pose.Rotate, _table.Items[owned.TemplateId])
                       && (parent.DicPlace == 0 || parent.DicPlace == change.RoomId
                           || (change.RoomId == OutdoorRoomId && change.ParentId == 22
                               && _table.Items[owned.TemplateId].Type == _table.OutDoorScene)));
@@ -1049,9 +1058,11 @@ public sealed partial class HouseFeature : IGameFeature
         }
         var next = new HouseState { NextObjId = state.NextObjId,
             Furniture = state.Furniture.Select(f => byId[f.ObjId]).ToList() };
-        if (_placementLimits is not null && !_placementLimits.WithinLimits(_table, state, next, cafeLevel))
+        if (!HousePlacementLimits.OutdoorLimit(_table, state, next)
+            || !HouseCollisionLimits.NoWorse(_table, state, next)
+            || _placementLimits is not null && !_placementLimits.WithinLimits(_table, state, next, cafeLevel))
         {
-            Log.Warn($"[session {session.Id}] UpdateHouseReq furniture category capacity exceeded; placement batch unchanged");
+            Log.Warn($"[session {session.Id}] UpdateHouseReq layout limits exceeded; placement batch unchanged");
             next = state;
             acceptedLayout = false;
             reply.NewFurnitures.Clear();
@@ -1268,15 +1279,17 @@ public sealed partial class HouseFeature : IGameFeature
         var tpl = _table.ItemOf(MusicSceneTemplateId);
         var list = state.Furniture.ToList();
         uint next = state.NextObjId;
+        bool hasPlacedOutdoor = state.Furniture.Any(f => f.RoomId != 0 && f.ParentId != 0
+            && _table.ItemOf(f.TemplateId)?.Type == _table.OutDoorScene);
 
-        // ★ ParentId 取表里的 Parent 列（外景 → 22）。语义是**父物件的 objId**，
-        //   而系统家具的 objId == templateId（见 HouseTable.OutdoorObjId 的取证）
-        //   ⇒ 直接用表值即可，不能写 0（第十二轮那个「parentid=0 让客户端挂不上场景树」的真 bug）。
+        // Placed scenes need the configured container (22). When another outdoor
+        // is already placed, grant ownership in storage (room/parent 0), like a
+        // normal furniture reward; HasByMusicScene checks ownership, not placement.
         list.Add(new HouseFurniture(
             ObjId: next++,
             TemplateId: MusicSceneTemplateId,
-            RoomId: OutdoorRoomId,
-            ParentId: tpl?.Parent ?? 22u,
+            RoomId: hasPlacedOutdoor ? 0 : OutdoorRoomId,
+            ParentId: hasPlacedOutdoor ? 0u : tpl?.Parent ?? 22u,
             PosX: 0, PosY: 0, Rotate: 0,
             BizCount: 0,
             Status: 0));
@@ -1284,7 +1297,7 @@ public sealed partial class HouseFeature : IGameFeature
         WriteState(player, new HouseState { Furniture = list, NextObjId = next });
 
         Log.Info($"[session {session.Id}] GM 补发音乐节外景（templateId={MusicSceneTemplateId}"
-               + $" objId={next - 1} parent={tpl?.Parent ?? 22u}）⇒ 咖啡馆音游入口已打开");
+               + $" objId={next - 1} stored={hasPlacedOutdoor}）⇒ 咖啡馆音游入口已打开");
     }
 
     /// <summary>

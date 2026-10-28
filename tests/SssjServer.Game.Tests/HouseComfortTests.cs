@@ -6,6 +6,33 @@ namespace SssjServer.Game.Tests;
 
 public class HouseComfortTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task UpgradeImmediatelyPersistsAndReturnsComfortIncludingZero(bool empty)
+    {
+        using var h = await FeatureHarness.CreateAsync("comfort-upgrade-" + empty);
+        h.Player.Level = 300;
+        h.Player.AddMoney(CafeBizFeature.GoldMoneyId, 1_000_000);
+        // Enough chairs to exercise the increased category capacity after upgrading.
+        var row = Table.Items.Values.First(r => r.Type == 104 && r.AddScore > 0 && !r.IsSystem);
+        var inventory = new HouseState { Furniture = empty ? [] : Enumerable.Range(0, 100)
+            .Select(i => Item((uint)(1000 + i), row.Id)).ToList(), NextObjId = 2000 };
+        HouseFeature.WriteState(h.Player, inventory);
+        CafeFeature.WriteState(h.Player, new CafeFeature.CafeState(1, 100_000, 9999));
+
+        await h.DispatchLuaCallAsync(CafeBizFeature.LevelUpCmd, "{}");
+
+        var payload = System.Text.Json.Nodes.JsonNode.Parse(h.LastOutbound.Json)!["tbParam"]!;
+        int expected = HouseComfort.Calculate(Table, inventory, 2, CafeTable.Load(TestPaths.SettingDir).MaxComfort);
+        Assert.Equal(2, payload["level"]!.GetValue<int>());
+        Assert.Equal(expected, payload["comfort"]!.GetValue<int>());
+        var saved = new PlayerStore(h.Options).Load(h.Player.Account)!;
+        Assert.Equal(expected, CafeFeature.ReadState(saved).Comfort);
+        Assert.Equal(100_000, CafeFeature.ReadState(saved).Hot);
+        if (!empty) Assert.True(expected > HouseComfort.Calculate(Table, inventory, 1, int.MaxValue));
+    }
+
     [Fact]
     public async Task CafeDownloadRecalculatesAfterInventoryRemoval()
     {

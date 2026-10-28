@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text;
 using SssjServer.Core;
 using SssjServer.Game.Config;

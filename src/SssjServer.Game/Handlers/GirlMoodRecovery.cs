@@ -1,4 +1,4 @@
-using System.Text.Json.Nodes;
+﻿using System.Text.Json.Nodes;
 using System.Runtime.CompilerServices;
 using SssjServer.Core;
 using SssjServer.Game.Config;
@@ -12,6 +12,8 @@ internal sealed class GirlMoodRecovery
     private static readonly ConditionalWeakTable<ClientSession, SessionMarker> Sessions = new();
     private sealed class SessionMarker { internal string Token { get; } = Guid.NewGuid().ToString("N"); }
     private static string Token(ClientSession session) => Sessions.GetValue(session, _ => new()).Token;
+    internal static bool IsInCafe(ClientSession session, Player player)
+        => (player.Extra.GetValueOrDefault(ExtraKey) as JsonObject)?["cafeSession"]?.ToString() == Token(session);
     private readonly CafeTable _cafe;
     private readonly SettingTable? _levels;
     private readonly SettingTable? _comfort;
@@ -44,7 +46,7 @@ internal sealed class GirlMoodRecovery
         return true;
     }
 
-    internal bool Refresh(ClientSession? session, Player player, long now)
+    internal bool Refresh(ClientSession? session, Player player, long now, bool notify = true)
     {
         var state = CafeFeature.ReadState(player, _cafe);
         var content = CafeFeature.ReadContent(player, state, _cafe,
@@ -125,11 +127,11 @@ internal sealed class GirlMoodRecovery
             }
             if (oldMood != girl.Moodvalue)
             {
-                if (session is not null) GameNotify.PushGirl(session, girl);
+                if (session is not null && notify) GameNotify.PushGirl(session, girl);
                 changed = true;
             }
         }
-        if (session is not null && tasks.Count > 0) GameNotify.PushTaskValues(session, tasks);
+        if (session is not null && notify && tasks.Count > 0) GameNotify.PushTaskValues(session, tasks);
         return changed;
     }
 }

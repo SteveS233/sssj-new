@@ -1,4 +1,4 @@
-using System.Text.Json;
+﻿using System.Text.Json;
 using System.Text.Json.Nodes;
 using SssjServer.Core;
 using SssjServer.Game.Config;
@@ -39,7 +39,7 @@ namespace SssjServer.Game.Handlers;
 ///     空数组会在 <c>:1249</c> NRE。</item>
 ///   <item><c>tbAwards[i].tbGDPL</c> **必填** <c>[g,d,p,l]</c>（<c>:679</c> 直接 unpack）。</item>
 ///   <item><c>bHasCard</c>：**必须显式 <c>false</c> 才播抽卡剧情**，
-///     <c>true</c> 或省略都跳过 —— 本实现一律给 <c>true</c>（不播剧情，避免依赖剧情资源）。</item>
+///     使用抽取前的永久收藏及持有状态，首次为false，重复为true。</item>
 ///   <item><c>nTotalTimes</c> **条件必填**：池子 <c>UpBoxNum &gt; 0</c> 且
 ///     <c>RotateVersion &gt; 0</c> 时 <c>:1241</c> 会做 <c>nTotalTimes % nUpBoxNum</c>，
 ///     nil 直接抛。本实现无条件填。</item>
@@ -73,7 +73,7 @@ namespace SssjServer.Game.Handlers;
 /// 池不存在/已过期时回 <c>error.gacha.notexists</c> —— 客户端 <c>:639</c> 特判它，
 /// 会弹「换池」对话框而不是普通错误框。
 /// </summary>
-public sealed class GachaFeature : IGameFeature
+public sealed partial class GachaFeature : IGameFeature, IGamePulseFeature
 {
     /// <summary>抽卡（上下行同名）。</summary>
     public const string FnLottery = "Lottery";
@@ -112,6 +112,7 @@ public sealed class GachaFeature : IGameFeature
 
     /// <summary>角色十连次数（不分池，<c>CARD_GACHA_MUL = 10002</c>）。</summary>
     public const int TaskCardMul = 10002;
+    public const int TaskFreeTime = 8001;
 
     // ---- errorKey（客户端硬编码特判的两个）----
 
@@ -133,6 +134,7 @@ public sealed class GachaFeature : IGameFeature
 
     private GameFeatureContext _ctx = null!;
     private GachaTable _table = GachaTable.Empty;
+    private GachaRequestLimits _requestLimits = null!;
     private readonly Random _rng;
     public GachaFeature() => _rng = new Random();
     internal GachaFeature(Random random) => _rng = random;
@@ -143,6 +145,15 @@ public sealed class GachaFeature : IGameFeature
     {
         _ctx = ctx;
         _table = GachaTable.Load(Path.GetFullPath(ctx.Options.SettingDirectory));
+        _requestLimits = new GachaRequestLimits(Path.GetFullPath(ctx.Options.SettingDirectory));
+        ctx.OnPlayerPrepare((session, player) =>
+        {
+            long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            bool changed = CardCollection.SyncOwned(player, ctx.CharacterCards);
+            changed |= GachaFreeDraws.Refresh(player, _table.OpenAt(now), now, []);
+            changed |= GachaVersionState.Refresh(player, _table.OpenAt(now), []);
+            if (changed) ctx.Store.Save(player);
+        });
 
         ctx.MapFunction(FnLottery, OnLottery);
         // GetLastGacha 的 sJsonParam 是**裸布尔**，JsonNode.Parse("true") 能过，所以走普通通道即可
@@ -156,6 +167,11 @@ public sealed class GachaFeature : IGameFeature
 
     private Task OnLottery(ClientSession session, string function, JsonNode? param)
     {
+        if(session.Tag is not Player player)return Task.CompletedTask;
+        lock(player)return OnLotteryLocked(session,function,param);
+    }
+    private Task OnLotteryLocked(ClientSession session, string function, JsonNode? param)
+    {
         if (session.Tag is not Player player)
         {
             Log.Warn($"[session {session.Id}] Lottery 到达但会话未登录，忽略");
@@ -163,8 +179,12 @@ public sealed class GachaFeature : IGameFeature
         }
 
         var request = param as JsonObject;
-        int poolId = ReadInt(request?["nId"], 0);
-        bool ten = ReadBool(request?["bTen"]);
+        if (!GachaRequestLimits.TryInteger(request?["nId"], out int poolId) || poolId <= 0
+            || !GachaRequestLimits.TryMode(request?["bTen"], out bool ten))
+        {
+            Reply(session, FnLottery, new JsonObject { ["err"] = ErrNotExists });
+            return Task.CompletedTask;
+        }
         long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
         // ★ 一个池 id 有多段档期，Get(id, now) 只返回当前生效的那一段（见 GachaTable 类注释）
@@ -205,6 +225,11 @@ public sealed class GachaFeature : IGameFeature
         }
 
         int draws = ten ? TenCount : 1;
+        if (!_requestLimits.HasRoom(player, 1, draws))
+        {
+            Reply(session, FnLottery, new JsonObject { ["err"] = "error.gacha.maxcard" });
+            return Task.CompletedTask;
+        }
         if (pool.JudgeType is 3 or 4 && !ValidChoice(pool,
             player.GetTask(TaskGroup, TaskCardCustomChoice + pool.Id)))
         {
@@ -216,9 +241,35 @@ public sealed class GachaFeature : IGameFeature
             Reply(session, FnLottery, new JsonObject { ["err"] = ErrNotExists });
             return Task.CompletedTask;
         }
+        List<int[]> bonus;
+        try { bonus = PlanBonusRewards(pool, player.GetTask(TaskGroup, TaskPrePoolBegin + pool.Id), draws); }
+        catch (InvalidDataException)
+        {
+            Reply(session, FnLottery, new JsonObject { ["err"] = ErrNotExists });
+            return Task.CompletedTask;
+        }
+        if (bonus.Any(tuple => _ctx.ItemTemplates.Get((uint)tuple[0], (uint)tuple[1],
+            (uint)tuple[2], (uint)tuple[3]) is null))
+        {
+            Reply(session, FnLottery, new JsonObject { ["err"] = ErrNotExists });
+            return Task.CompletedTask;
+        }
+        if (pool.JudgeType == 2)
+            return PreviewNewcomer(session, player, pool, ten, bonus);
+
+        int operationKey = ten ? TaskCardMul : TaskCardSingle;
+        if (player.GetTask(TaskGroup, operationKey) == int.MaxValue ||
+            new[] { TaskTotal, TaskPrePoolBegin + pool.Id, TaskProtectBegin + pool.Id,
+                TaskProtectUpBegin + pool.Id }.Any(key => player.GetTask(TaskGroup, key) > int.MaxValue - draws))
+        {
+            Reply(session, FnLottery, new JsonObject { ["err"] = ErrNotExists });
+            return Task.CompletedTask;
+        }
 
         // ---- 扣费（GachaCommon:JudgeCurrency 的顺序：道具 → 免费钻 → 免费钻+付费钻）----
-        var spend = TrySpend(player, pool, ten);
+        RefreshFreeState(session, player, now);
+        var paymentBefore = new GachaPaymentSnapshot(player);
+        var spend = TrySpend(player, pool, ten, now);
         if (!spend.Ok)
         {
             Log.Warn($"[session {session.Id}] Lottery nId={poolId} bTen={ten} 消耗不足：{spend.Reason}");
@@ -226,24 +277,32 @@ public sealed class GachaFeature : IGameFeature
             return Task.CompletedTask;
         }
 
+        var payment = paymentBefore.After(player);
+
         // ---- 抽卡 ----
         var seed = _table.GetSeed(pool.CardStarSeedId);
         var results = new List<DrawResult>(draws);
-        for (int i = 0; i < draws; i++)
-            results.Add(DrawOne(player, pool, seed));
-
-        // ---- 入账 + 推送 ----
         var granted = new RewardGrantResult();
-        foreach (var r in results)
+        for (int i = 0; i < draws; i++)
         {
+            var r = DrawOne(player, pool, seed);
+            results.Add(r);
             _ctx.Rewards.Grant(player,
                 new[] { new[] { r.Card.G, r.Card.D, r.Card.P, r.Card.L, 1 } },
                 RewardSource.Extra, granted);
         }
+        _ctx.Rewards.Grant(player, bonus, RewardSource.Extra, granted);
+        player.SetTask(TaskGroup, operationKey, player.GetTask(TaskGroup, operationKey) + 1);
 
         var record = BuildAwards(player, pool, results);
-        WriteLast(player, ten, record);
+        JsonArray? companion = pool.GetItem is { Length: >= 4 } && bonus.Count > 0
+            ? new JsonArray(bonus[0].Select(n => (JsonNode?)JsonValue.Create(n)).ToArray()) : null;
+        WriteLast(player, ten, record, companion);
+        var history = GachaHistory.Append(player,1,pool.Id,now,results.Select(r=>new[]{r.Card.G,r.Card.D,r.Card.P,r.Card.L}),payment,
+            results.FindIndex(r=>r.ByProtect)+1);
         _ctx.Store.Save(player);
+
+        GachaHistory.Push(session,1,history);
 
         // 货币/券的扣除与卡片入包
         GameNotify.PushMoney(session, player, spend.ChangedMoney);
@@ -257,6 +316,7 @@ public sealed class GachaFeature : IGameFeature
             ["bTen"] = ten,
             ["tbAwards"] = record.DeepClone(),
         };
+        if (companion is not null) reply["getItem"] = companion.DeepClone();
         Reply(session, FnLottery, reply);
 
         Log.Info($"[session {session.Id}] Lottery nId={poolId}（{pool.Name}）bTen={ten} " +
@@ -348,8 +408,7 @@ public sealed class GachaFeature : IGameFeature
         if (card.Star >= 4)
             player.SetTask(TaskGroup, protectKey, 0);   // 出 4★ 清零保底
 
-        bool firstGet = player.Items.All(i => !(i.Genre == (uint)card.G && i.Detail == (uint)card.D
-                                             && i.Particular == (uint)card.P && i.Level == (uint)card.L));
+        bool firstGet = !CardCollection.HasOwned(player, (uint)card.G, (uint)card.D, (uint)card.P, (uint)card.L);
 
         return new DrawResult(card, byProtect, firstGet, protectCount, poolTimes, isUp,
             byUpProtect ? nextUp : 0);
@@ -460,7 +519,7 @@ public sealed class GachaFeature : IGameFeature
     // =================================================================
 
     /// <summary>扣费结果。</summary>
-    private sealed class SpendResult
+    internal sealed class SpendResult
     {
         public bool Ok { get; set; }
         public string Reason { get; set; } = "";
@@ -481,9 +540,19 @@ public sealed class GachaFeature : IGameFeature
     /// 其它值直接扣 id == <c>CashType</c> 的货币。
     /// <c>CanUseFreeDiamond == 0</c> 时不许用免费钻。
     /// </summary>
-    private SpendResult TrySpend(Player player, GachaPool pool, bool ten)
+    internal SpendResult TrySpend(Player player, GachaPool pool, bool ten, long now)
     {
         var r = new SpendResult();
+        int freeKey = TaskFreeTime + pool.Id;
+        int used = player.GetTask(TaskGroup, freeKey);
+        if (!ten && pool.FreeAvailableAt(now, used))
+        {
+            player.SetTask(TaskGroup, freeKey, used + 1);
+            r.ChangedTasks.Add(new(Player.ComposeTaskId(TaskGroup, freeKey), used + 1));
+            r.Note($"免费次数 {used + 1}/{pool.FreeCount}");
+            r.Ok = true;
+            return r;
+        }
 
         if (pool.CashType is 0 or 1)
         {
@@ -578,8 +647,7 @@ public sealed class GachaFeature : IGameFeature
 
     /// <summary>
     /// 组 <c>tbAwards</c>。每项的字段与必填性见类注释 §2。
-    /// ★ <c>bHasCard</c> 一律给 <c>true</c>：只有显式 <c>false</c> 才播抽卡剧情
-    /// （需要剧情资源，而本地快照未必有），给 true 是安全的「跳过演出」。
+    /// bHasCard按抽取前的收藏历史填写，让客户端走原有首次剧情/重复展示分支。
     /// </summary>
     private JsonArray BuildAwards(Player player, GachaPool pool, List<DrawResult> results)
     {
@@ -591,7 +659,7 @@ public sealed class GachaFeature : IGameFeature
             {
                 ["tbGDPL"] = gdpl,
                 ["nId"] = r.Card.Id,
-                ["bHasCard"] = true,          // 显式 true = 跳过抽卡剧情
+                ["bHasCard"] = !r.FirstGet,
                 ["bFirstGet"] = r.FirstGet,
                 ["nTimes"] = r.Times,
                 ["nTotalTimes"] = r.TotalTimes,   // 条件必填，无条件填更安全
@@ -636,6 +704,14 @@ public sealed class GachaFeature : IGameFeature
     {
         if (session.Tag is not Player player)
             return Task.CompletedTask;
+        if (param is not JsonValue value || !value.TryGetValue<bool>(out bool confirm))
+        {
+            Reply(session, FnGetLastGacha, new JsonObject { ["err"] = ErrNoLast });
+            return Task.CompletedTask;
+        }
+
+        RefreshFreeState(session, player, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+        if (HandleNewcomerLast(session, player, confirm)) return Task.CompletedTask;
 
         var last = ReadLast(player);
         if (last is null)
@@ -667,10 +743,13 @@ public sealed class GachaFeature : IGameFeature
             return Task.CompletedTask;
 
         var request = param as JsonObject;
-        int poolId = ReadInt(request?["nId"], 0);
+        if (!GachaRequestLimits.TryInteger(request?["nId"], out int poolId) || poolId <= 0)
+            return RejectCustomSelection(session);
         var items = request?["tbItems"] as JsonArray;
-        int card1 = items is { Count: > 0 } ? ReadInt(items[0], 0) : 0;
-        int card2 = items is { Count: > 1 } ? ReadInt(items[1], 0) : 0;
+        if (items is null || items.Count is < 1 or > 2
+            || !GachaRequestLimits.TryInteger(items[0], out int card1)) return RejectCustomSelection(session);
+        int card2 = 0;
+        if (items.Count > 1 && !GachaRequestLimits.TryInteger(items[1], out card2)) return RejectCustomSelection(session);
 
         int value = (card1 & 0xFFFF) | ((card2 & 0xFFFF) << 16);
         int choiceKey = TaskCardCustomChoice + poolId;
@@ -681,13 +760,13 @@ public sealed class GachaFeature : IGameFeature
             || card1 is <= 0 or > 0xFFFF || card2 is < 0 or > 0xFFFF
             || !ValidChoice(pool, value) || pool.SetUpNum <= 0
             || player.GetTask(TaskGroup, timeKey) >= pool.SetUpNum)
-            return Task.CompletedTask;
+            return RejectCustomSelection(session);
 
         if (choiceKey <= 0 || timeKey <= 0 || choiceKey > 0xFFFF || timeKey > 0xFFFF)
         {
             // Player.ComposeTaskId 只留低 16 位
             Log.Warn($"[session {session.Id}] SetCardCustomUp nId={poolId} 的任务键越界（{choiceKey}/{timeKey}），忽略");
-            return Task.CompletedTask;
+            return RejectCustomSelection(session);
         }
 
         player.SetTask(TaskGroup, choiceKey, value);
@@ -703,6 +782,15 @@ public sealed class GachaFeature : IGameFeature
 
         Log.Info($"[session {session.Id}] SetCardCustomUp nId={poolId} card1={card1} card2={card2} " +
                  $"→ (15,{choiceKey})={value}（次数 {player.GetTask(TaskGroup, timeKey)}）");
+        // S2C.SetCardCustomUp hides Blocking and refreshes the pool after task updates.
+        Reply(session, FnSetCardCustomUp, new JsonObject { ["nId"] = poolId });
+        return Task.CompletedTask;
+    }
+
+    private Task RejectCustomSelection(ClientSession session)
+    {
+        _ctx.LuaCalls.CallClient(session, GmConsoleFeature.DoLuaStringCmd,
+            new JsonObject { ["luaStr"] = "Game.Blocking.Hide()" });
         return Task.CompletedTask;
     }
 
@@ -711,7 +799,26 @@ public sealed class GachaFeature : IGameFeature
     // =================================================================
 
     /// <summary>把本次结果存进 <c>Player.Extra["gacha"]</c>，供 <c>GetLastGacha</c> 回放。</summary>
-    private static void WriteLast(Player player, bool ten, JsonArray awards)
+    internal static List<int[]> PlanBonusRewards(GachaPool pool, int previous, int draws)
+    {
+        var rewards = new List<int[]>();
+        void Add(int[]? tuple, long multiplier)
+        {
+            if (tuple is not { Length: >= 4 } || multiplier <= 0) return;
+            long quantity = (tuple.Length >= 5 ? tuple[4] : 1L) * multiplier;
+            if (tuple.Take(4).Any(n => n <= 0) || quantity <= 0 || quantity > int.MaxValue)
+                throw new InvalidDataException("抽卡伴随奖励配置无效");
+            rewards.Add([tuple[0], tuple[1], tuple[2], tuple[3], (int)quantity]);
+        }
+        Add(pool.GetItem, draws);
+        long before = Math.Max(0, previous), after = before + draws;
+        if (pool.UpBoxNum > 0)
+            Add(pool.UpBox, pool.RotateVersion > 0 ? after / pool.UpBoxNum - before / pool.UpBoxNum
+                : before < pool.UpBoxNum && after >= pool.UpBoxNum ? 1 : 0);
+        return rewards;
+    }
+
+    private static void WriteLast(Player player, bool ten, JsonArray awards, JsonArray? companion = null)
     {
         player.Extra[ExtraKey] = new JsonObject
         {
@@ -719,6 +826,7 @@ public sealed class GachaFeature : IGameFeature
             ["tbAwards"] = awards.DeepClone(),
             ["at"] = DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
         };
+        if (companion is not null) ((JsonObject)player.Extra[ExtraKey]!)["getItem"] = companion.DeepClone();
     }
 
     /// <summary>读上一次结果（形状与 <c>S2C.Lottery</c> 相同，可直接回给客户端）。</summary>
@@ -728,12 +836,27 @@ public sealed class GachaFeature : IGameFeature
             return null;
         if (obj["tbAwards"] is not JsonArray arr || arr.Count == 0)
             return null;
-        return new JsonObject
+        var result = new JsonObject
         {
             ["bTen"] = obj["bTen"]?.DeepClone() ?? false,
             ["tbAwards"] = arr.DeepClone(),
         };
+        if (obj["getItem"] is JsonArray companion) result["getItem"] = companion.DeepClone();
+        return result;
     }
+
+    private void RefreshFreeState(ClientSession session, Player player, long now)
+    {
+        var tasks = new List<KeyValuePair<uint, int>>();
+        var pools = _table.OpenAt(now).ToArray();
+        bool changed = GachaFreeDraws.Refresh(player, pools, now, tasks);
+        changed |= GachaVersionState.Refresh(player, pools, tasks);
+        if (changed) _ctx.Store.Save(player);
+        if (tasks.Count > 0) GameNotify.PushTaskValues(session, tasks);
+    }
+
+    void IGamePulseFeature.OnPlayerPulse(ClientSession session, Player player)
+        => RefreshFreeState(session, player, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
 
     private void Reply(ClientSession session, string function, JsonObject payload)
         => _ctx.LuaCalls.CallClientFunction(session, function, payload);

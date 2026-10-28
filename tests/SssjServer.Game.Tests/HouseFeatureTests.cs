@@ -1589,6 +1589,22 @@ public class CafeVisitGirlTests
 /// </summary>
 public class MusicSceneGrantTests
 {
+    [Fact]
+    public async Task ExistingOutdoorIsPreservedAndMusicGrantGoesToStorage()
+    {
+        using var h = await GmAsync("music-scene-preserve-outdoor");
+        var outdoor = new HouseFurniture(1000, 1000, 5, 22, 0, 0, 0, 0, 0);
+        HouseFeature.WriteState(h.Player, new HouseState { Furniture = [outdoor], NextObjId = 1001 });
+        h.RunPrepareHooks();
+        h.RunPrepareHooks();
+        var state = HouseFeature.ReadOrCreate(h.Player, Table);
+        Assert.Equal(outdoor, state.Furniture[0]);
+        var music = Assert.Single(state.Furniture, f => f.TemplateId == HouseFeature.MusicSceneTemplateId);
+        Assert.Equal(0, music.RoomId);
+        Assert.Equal(0u, music.ParentId);
+        Assert.Equal(1000, GirlTrainFeature.CurrentOutdoor(h.Player, Table));
+    }
+
     private static HouseTable Table => HouseTable.Load(TestPaths.SettingDir);
 
     /// <summary>

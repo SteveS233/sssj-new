@@ -1,4 +1,4 @@
-using System.Text.Json.Nodes;
+﻿using System.Text.Json.Nodes;
 using SssjServer.Core;
 using SssjServer.Game.Config;
 

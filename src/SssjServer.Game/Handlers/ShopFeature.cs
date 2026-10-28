@@ -173,6 +173,7 @@ public sealed class ShopFeature : IGameFeature
 
     private GameFeatureContext _ctx = null!;
     private ShopTable _table = ShopTable.Empty;
+    private CafeComfortSync _comfort = null!;
     private readonly Random _rng = new();
 
     public string Name => "商店（LuaCall 11/12/13/14）";
@@ -180,6 +181,7 @@ public sealed class ShopFeature : IGameFeature
     public void Install(GameFeatureContext ctx)
     {
         _ctx = ctx;
+        _comfort = new CafeComfortSync(ctx);
         // 自己加载配置表：不往 GameFeatureContext 加属性，避免多 agent 并行时改到公共文件
         _table = ShopTable.Load(Path.GetFullPath(ctx.Options.SettingDirectory));
 
@@ -325,8 +327,10 @@ public sealed class ShopFeature : IGameFeature
             return Task.CompletedTask;
         }
 
+        bool comfortChanged = result.Granted.ChangedFurniture.Count > 0 && _comfort.Refresh(session, player);
         _ctx.Store.Save(player);
         PushBuyResult(session, player, result);
+        _comfort.Push(session, player, comfortChanged);
 
         // ★ 回包必须回显请求三要素（GoodsLogicC:OnReqBuyGoods）：
         //   goodsid —— :393 拿它查配置，查不到就静默跳过奖励弹窗；
@@ -416,8 +420,10 @@ public sealed class ShopFeature : IGameFeature
 
         if (ok > 0)
         {
+            bool comfortChanged = merged.Granted.ChangedFurniture.Count > 0 && _comfort.Refresh(session, player);
             _ctx.Store.Save(player);
             PushBuyResult(session, player, merged);
+            _comfort.Push(session, player, comfortChanged);
         }
 
         Reply(session, CmdReqBuyFurList, reply);

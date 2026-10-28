@@ -6,6 +6,31 @@ namespace SssjServer.Game.Tests;
 
 public class GachaCustomTests
 {
+    [Fact]
+    public async Task ConfirmSelectionReturnsClientCallbackAfterPersistingChoice()
+    {
+        using var h = await FeatureHarness.CreateAsync("gacha-selection-callback");
+        var pool = GachaTable.Load(TestPaths.SettingDir).Get(401, DateTimeOffset.UtcNow.ToUnixTimeSeconds())!;
+        Assert.NotNull(pool);
+        var selected = pool.Cards.Values.Where(c => c.Star == 4 && c.UpFlag == 1).Take(2).ToArray();
+        await h.DispatchFunctionAsync(GachaFeature.FnSetCardCustomUp,
+            $"{{\"nId\":401,\"tbItems\":[{selected[0].Id},{selected[1].Id}]}}");
+        Assert.Equal(selected[0].Id | selected[1].Id << 16, h.Player.GetTask(15, 6402));
+        Assert.Equal(1, h.Player.GetTask(15, 7402));
+        Assert.Equal("SetCardCustomUp", h.LastOutbound.Function);
+        Assert.Equal(401, System.Text.Json.Nodes.JsonNode.Parse(h.LastOutbound.Json)!["nId"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task InvalidSelectionUnblocksWithoutChangingChoiceOrTimes()
+    {
+        using var h = await FeatureHarness.CreateAsync("gacha-selection-rejected");
+        await h.DispatchFunctionAsync(GachaFeature.FnSetCardCustomUp, "{\"nId\":401,\"tbItems\":[1,1]}");
+        Assert.Equal(0, h.Player.GetTask(15, 6402));
+        Assert.Equal(0, h.Player.GetTask(15, 7402));
+        Assert.Contains("Game.Blocking.Hide()", h.LastOutbound.Json);
+    }
+
     private static GachaPool Pool(int id) => GachaTable.Load(TestPaths.SettingDir).Segments(id).First();
 
     [Fact]

@@ -128,6 +128,7 @@ public sealed class GirlLoveFeature : IGameFeature
     public const int CurGirlTaskId = 20000;
 
     private GameFeatureContext _ctx = null!;
+    private PledgeTable _pledge = PledgeTable.Empty;
     private GirlLoveTable _love = GirlLoveTable.Empty;
 
     public string Name => "少女好感度/羁绊剧情（GirlGift/ViewStory + LuaCall 173,174,175,255,256）";
@@ -152,6 +153,7 @@ public sealed class GirlLoveFeature : IGameFeature
     public void Install(GameFeatureContext ctx)
     {
         _ctx = ctx;
+        _pledge = PledgeTable.Load(Path.GetFullPath(ctx.Options.SettingDirectory));
         _love = GirlLoveTable.Load(Path.GetFullPath(ctx.Options.SettingDirectory));
 
         ctx.AddFunctionCoHandler(Function, OnGirlLogicCommand);
@@ -391,6 +393,7 @@ public sealed class GirlLoveFeature : IGameFeature
         var changed = new List<Item>();
         var removed = new List<Item>();
         int taken = TakeItems(player, g, d, p, l, num, changed, removed);
+        PledgeFeature.RecordAction(_pledge, player, (int)girlId, "GiftCount", taken, l);
         var unlocked = UnlockStories(player, girlId);
         unlocked.AddRange(UnlockSecrets(_love, player, girlId, new[] { g, d, p, l }));
 
@@ -924,7 +927,7 @@ public sealed class GirlLoveFeature : IGameFeature
     /// <summary>
     /// 少女属性的 taskId：<c>(girlId - 1) * 2000 + off</c>，
     /// ★ 联动少女先减 200（`GirlCommon.lua:1516..1518`）。
-    /// <see cref="GmUnlock.GirlTaskId"/> 没有这个重映射，所以本域自己算。
+    /// 与 <see cref="GmUnlock.GirlTaskId"/> 的联动局部ID映射一致。
     /// </summary>
     internal static int VarTaskId(uint girlId, int off)
     {

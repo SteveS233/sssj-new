@@ -26,6 +26,7 @@ public enum RewardSource
     /// 第 6 位不再参与判定。
     /// </summary>
     RandomAward,
+    ThiefDrop,
 
     /// <summary>其它来源（章节累计奖励等）：第 6 位忽略，按 100% 发放、无标签。</summary>
     Extra,
@@ -120,6 +121,10 @@ public sealed class RewardGrantResult
     /// （列表是按 <c>SuitValue &gt; 0</c> 过滤的，`UI_GirlClothes.lua:847`）。
     /// </summary>
     public IReadOnlyList<KeyValuePair<uint, int>> ChangedTasks => _tasks;
+
+    private readonly HashSet<uint> _riki = new();
+    public IReadOnlyCollection<uint> ChangedRiki => _riki;
+    internal void NoteRiki(uint id) => _riki.Add(id);
 
     /// <summary>客户端要的 <c>tbAwards</c>：数组的数组。</summary>
     public int[][] ToAwardTuples()
@@ -304,6 +309,8 @@ public sealed class RewardService
     /// </summary>
     public GirlDressTable? Suits { get; set; }
     public CharacterCardTable? CharacterCards { get; set; }
+    public RikiCardTable? RikiCards { get; set; }
+    public MissionTable? Missions { get; set; }
     public HouseTable? Furniture { get; set; }
 
     internal bool IsCafeFurniture(uint g, uint d, uint p, uint l)
@@ -530,6 +537,8 @@ public sealed class RewardService
         if (_templates.TryGetMoneyId(g, d, p, l, out int moneyId))
         {
             player.AddMoney(moneyId, count);
+            if (g == 15 && d == 127 && p == 1 && l == 1 && Missions is not null)
+                Tower21Missions.TokensGained(player, Missions, count, result);
             result.NoteMoney(moneyId);
             result.AddReward(new GrantedReward(g, d, p, l, (uint)count, flag, moneyId, 0, name));
             return;
@@ -555,6 +564,14 @@ public sealed class RewardService
 
             if (g == GenreCard)
             {
+                if (CharacterCards is not null && Handlers.CardCollection.MarkOwned(player, CharacterCards, g, d, p, l) is { } owned)
+                    result.NoteTask(owned.Key, owned.Value);
+                if (CharacterCards?.Get(g, d, p, l) is not null && RikiCards is not null)
+                    foreach (uint id in RikiCards.MarkOwned(player, g, d, p, l))
+                    {
+                        result.NoteRiki(id);
+                        result.NoteTask(Player.ComposeTaskId(53, (int)id), 1);
+                    }
                 var before = player.GetGirl(d);
                 uint oldLevel = before?.Level ?? 0;
                 EnsureGirl(player, d, cardLevel);
@@ -721,6 +738,7 @@ public sealed class RewardService
     {
         RewardSource.FirstAward => FlagFirstClear,
         RewardSource.RandomAward => FlagRandom,
+        RewardSource.ThiefDrop => 10,
         _ => FlagNone,
     };
 }

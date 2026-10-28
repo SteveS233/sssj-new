@@ -66,8 +66,8 @@ public class CafeBizFeatureTests
     {
         using var h = await FeatureHarness.CreateAsync("coffee-stage-immediate");
         h.Player.SetTask(23, 6, 256 | 2);
-        await h.DispatchFunctionAsync("ChapterMsg",
-            "{\"nState\":1,\"Chapter\":4,\"Index\":12,\"Difficult\":1,\"nStar\":7}");
+        await h.DispatchFunctionAsync("ChapterMsg", new JsonObject { ["nState"] = 0, ["Chapter"] = 4, ["Index"] = 12, ["Difficult"] = 1 }.ToJsonString());
+        await h.CompleteChapterAsync(4, 12, 1);
         Assert.Equal(259, h.Player.GetTask(23, 6));
         var saved = new PlayerStore(h.Options).Load(h.Player.Account)!;
         Assert.Equal(259, saved.GetTask(23, 6));

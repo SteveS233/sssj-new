@@ -9,6 +9,52 @@ namespace SssjServer.Game.Tests;
 
 public class HousePlacementLimitTests
 {
+    [Fact]
+    public async Task AddingSecondPlacedOutdoorIsRejectedAndEchoesExistingLayout()
+    {
+        var first = Furniture(1000, 1000, 5, 22);
+        var second = Furniture(1001, 1400, 0, 0);
+        var player = Seed(30, first, second);
+        var reply = await Save(player, Move(second, 5, 22));
+        Assert.Equal(0u, Assert.Single(reply.NewFurnitures).RoomId);
+        var saved = HouseFeature.ReadOrCreate(player, Table);
+        Assert.Equal(first, saved.Furniture[0]);
+        Assert.Equal(second, saved.Furniture[1]);
+        Assert.Equal(1000, GirlTrainFeature.CurrentOutdoor(player, Table));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task OutdoorSwitchIsAtomicRegardlessOfChangeOrder(bool reverse)
+    {
+        var first = Furniture(1000, 1000, 5, 22);
+        var second = Furniture(1001, 1400, 0, 0);
+        var player = Seed(30, first, second);
+        furniture[] changes = [Move(first, 0, 0), Move(second, 5, 22)];
+        await Save(player, reverse ? changes.Reverse().ToArray() : changes);
+        var saved = HouseFeature.ReadOrCreate(player, Table);
+        Assert.Equal(0, saved.Furniture[0].RoomId);
+        Assert.Equal(5, saved.Furniture[1].RoomId);
+        Assert.Equal(1400, GirlTrainFeature.CurrentOutdoor(player, Table));
+        await Save(player, Move(saved.Furniture[1], 0, 0));
+        Assert.Equal(72, GirlTrainFeature.CurrentOutdoor(player, Table));
+    }
+
+    [Fact]
+    public async Task LegacyMultipleOutdoorsCanBeReducedButNotIncreased()
+    {
+        var first = Furniture(1000, 1000, 5, 22);
+        var second = Furniture(1001, 1400, 5, 22);
+        var third = Furniture(1002, 1800, 0, 0);
+        var player = Seed(30, first, second, third);
+        await Save(player, Move(third, 5, 22));
+        Assert.Equal(0, HouseFeature.ReadOrCreate(player, Table).Furniture[2].RoomId);
+        await Save(player, Move(first, 0, 0));
+        Assert.Equal(1400, GirlTrainFeature.CurrentOutdoor(player, Table));
+        Assert.Equal(3, HouseFeature.ReadOrCreate(player, Table).Furniture.Count);
+    }
+
     private static HouseTable Table => HouseTable.Load(TestPaths.SettingDir);
     private static HouseFurniture Furniture(uint id, int template, int room = 1, uint parent = 2)
         => new(id, template, room, parent, 4, 5, 0, 1, 0);
@@ -58,7 +104,13 @@ public class HousePlacementLimitTests
     {
         var items = Enumerable.Range(0, count).Select(i => Furniture((uint)(1000 + i), 101, 0, 0)).ToArray();
         var player = Seed(level, items);
-        await Save(player, items.Select(f => Move(f, 1, 2)).ToArray());
+        await Save(player, items.Select((f, i) =>
+        {
+            var move = Move(f, 1, 2);
+            move.Pose!.PosX = (uint)(i % 4 * 7);
+            move.Pose.PosY = (uint)(i / 4 * 7);
+            return move;
+        }).ToArray());
         var state = HouseFeature.ReadOrCreate(player, Table);
         Assert.Equal(accepted ? count : 0, state.Furniture.Count(f => f.RoomId == 1));
         Assert.Equal(count, state.Furniture.Count);

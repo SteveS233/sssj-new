@@ -166,6 +166,11 @@ public sealed class GirlDressFeature : IGameFeature
     /// </summary>
     private Task OnSetMainGirl(ClientSession session, Player player, JsonNode? param)
     {
+        lock (player) return SetMainGirlLocked(session, player, param);
+    }
+
+    private Task SetMainGirlLocked(ClientSession session, Player player, JsonNode? param)
+    {
         uint girlId = (uint)ReadInt(param?["nId"]);
 
         if (girlId == 0 || player.GetGirl(girlId) is null)
@@ -177,6 +182,13 @@ public sealed class GirlDressFeature : IGameFeature
             return Task.CompletedTask;
         }
 
+        long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        try { _ctx.PledgeTimes.SaveRefresh(_ctx.Store, player, now); }
+        catch (Exception)
+        {
+            Fail(session, CmdSetMainGirl, ErrGeneric);
+            return Task.CompletedTask;
+        }
         int before = player.GetTask(GmUnlock.MainGirlGroup, GmUnlock.MainGirlTaskId);
         if (before == (int)girlId)
         {
@@ -187,8 +199,19 @@ public sealed class GirlDressFeature : IGameFeature
             return Task.CompletedTask;
         }
 
-        player.SetTask(GmUnlock.MainGirlGroup, GmUnlock.MainGirlTaskId, (int)girlId);
-        _ctx.Store.Save(player);
+        var snapshot = new ChallengeMutationSnapshot(player);
+        try
+        {
+            player.SetTask(GmUnlock.MainGirlGroup, GmUnlock.MainGirlTaskId, (int)girlId);
+            _ctx.PledgeTimes.Refresh(player, now);
+            _ctx.Store.SaveRequired(player);
+        }
+        catch (Exception)
+        {
+            snapshot.Restore(player);
+            Fail(session, CmdSetMainGirl, ErrGeneric);
+            return Task.CompletedTask;
+        }
 
         // ★ 先推数据、再回包（客户端 handler 不收参数、直接重读任务值）
         GameNotify.PushTaskValues(session, new[]

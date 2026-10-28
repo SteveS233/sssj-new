@@ -120,6 +120,8 @@ public sealed class GameModule
         // 与上面的 Boxes 是同一条链的两环（礼包→皮肤道具→服饰可穿），缺一环都是「钱花了没东西」。
         _rewards.Suits = GirlDressTable.Load(settingDir);
         _rewards.CharacterCards = _characterCards;
+        _rewards.Missions = _missions;
+        _rewards.RikiCards = RikiCardTable.Load(settingDir);
         _rewards.Furniture = HouseTable.Load(settingDir);
         _gmUnlock = new GmUnlock(options, _chapters, _itemTemplates, _characterCards, _missions,
                                  _guides, _playerExp, _missingIcons);
@@ -212,7 +214,7 @@ public sealed class GameModule
         // ② 通关结算被 LuaCall.DoSettle(252) 包了一层（GameManager.SendInfoToServer）
         _chapterHandler = new ChapterHandler(_store, luaCalls, _chapters, _options.SpendVigour, _rewards,
             cafe: CafeTable.Load(Path.GetFullPath(_options.SettingDirectory)),
-            girlLove: GirlLoveTable.Load(Path.GetFullPath(_options.SettingDirectory)));
+            girlLove: GirlLoveTable.Load(Path.GetFullPath(_options.SettingDirectory)), playerExp: _playerExp, cards: CardTable.Load(Path.GetFullPath(_options.SettingDirectory)), cardTemplates: _characterCards, missions: _missions, pledge: PledgeTable.Load(Path.GetFullPath(_options.SettingDirectory)));
         luaCalls.MapFunction(ChapterHandler.Function, _chapterHandler.OnScriptCall);
 
         // ---- 编队保存：出击流程的第一道服务器闸门（UI_Formation:ApplySave 等回包）----
@@ -223,9 +225,13 @@ public sealed class GameModule
         RegisterLuaCall(ChapterHandler.DoSettleCmd, (session, cmd, param) =>
         {
             // DoSettle 的 tbParam 形如 { sCmd = <内层命令>, tbParam = {...} }
-            var innerCmd = param?["sCmd"];
-            var innerParam = param?["tbParam"];
+            if (param is not JsonObject envelope) return Task.CompletedTask;
+            var innerCmd = envelope["sCmd"];
+            var innerParam = envelope["tbParam"];
             string? name = innerCmd?.GetValueKind() == JsonValueKind.String ? innerCmd.GetValue<string>() : null;
+
+            if (innerCmd is JsonValue numeric && numeric.TryGetValue<int>(out int settlementCmd) && settlementCmd is 51 or 52 or 55 or 56)
+                return luaCalls.DispatchSettlementAsync(session, settlementCmd, innerParam);
 
             if (string.Equals(name, ChapterHandler.Function, StringComparison.Ordinal))
                 return _chapterHandler.OnSettle(session, innerParam);
@@ -490,6 +496,12 @@ public sealed class GameModule
     internal Task HandleKeepAlive(IGameSession session, Packet packet)
     {
         session.Send(GamePf.KeepAlive, packet.Serial, new KeepAlive());
+        if (session is SessionAdapter adapter && session.Tag is Player player)
+            foreach (var feature in _features.OfType<IGamePulseFeature>())
+            {
+                try { feature.OnPlayerPulse(adapter.Inner, player); }
+                catch (Exception e) { Log.Warn($"[session {session.Id}] 心跳维护失败：{e.Message}"); }
+            }
         return Task.CompletedTask;
     }
 

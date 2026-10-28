@@ -85,6 +85,11 @@ public class HouseUpdateTests
     [InlineData("pose")]
     [InlineData("partial")]
     [InlineData("duplicate")]
+    [InlineData("x-outside")]
+    [InlineData("y-outside")]
+    [InlineData("wrapped-coordinate")]
+    [InlineData("rotation")]
+    [InlineData("footprint")]
     public async Task InvalidPlacementReturnsOriginalAndDoesNotChangeState(string kind)
     {
         var player = new Player("house-invalid", 123);
@@ -101,6 +106,11 @@ public class HouseUpdateTests
             case "crossroom": change.RoomId = 6; break;
             case "pose": change.Pose!.ParentTemplateId = 2; break;
             case "partial": change.Pose!.ClearPosX(); break;
+            case "x-outside": change.Pose!.PosX = 29; break;
+            case "y-outside": change.Pose!.PosY = 29; break;
+            case "wrapped-coordinate": change.Pose!.PosX = uint.MaxValue; break;
+            case "rotation": change.Pose!.Rotate = 45; break;
+            case "footprint": change.Pose!.PosX = 24; break;
         }
         var req = new UpdateHouseReq();
         req.Furnitures.Add(change);

@@ -90,6 +90,10 @@ public class HousePlanTests
     [InlineData("quantity")]
     [InlineData("partial")]
     [InlineData("unknown-update")]
+    [InlineData("x-outside")]
+    [InlineData("y-outside")]
+    [InlineData("rotation")]
+    [InlineData("footprint")]
     public async Task InvalidPlansDoNotCreateLayoutsOrFurniture(string kind)
     {
         var player = new Player("plan-invalid", 77);
@@ -105,6 +109,10 @@ public class HousePlanTests
             case "quantity": theme.Poses.Add(ProtoMessage.Parse<objPose>(theme.Poses[0].ToByteArray())); break;
             case "partial": theme.Poses[0].ClearPosY(); break;
             case "unknown-update": theme.ThemeId = 1234; theme.NewGenerate = false; break;
+            case "x-outside": theme.Poses[0].PosX = uint.MaxValue; break;
+            case "y-outside": theme.Poses[0].PosY = 29; break;
+            case "rotation": theme.Poses[0].Rotate = 45; break;
+            case "footprint": theme.Poses[0].PosY = 24; break;
         }
         Assert.Empty((await Save(player, theme)).NewThemes);
         Assert.Equal(before, player.Extra["house"]!.ToJsonString());

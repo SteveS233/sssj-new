@@ -1,4 +1,4 @@
-using SssjServer.Core;
+﻿using SssjServer.Core;
 
 namespace SssjServer.Game.Config;
 

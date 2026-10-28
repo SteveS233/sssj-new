@@ -26,6 +26,8 @@ public class GachaRotationTests
             Assert.Equal("second", cards.Get(1, 100)!.PoolFile);
             Assert.Equal("first", cards.Get(1, 200)!.PoolFile);
             Assert.Equal("weapon", weapons.Get(1, 100)!.PoolFile);
+            if (Environment.GetEnvironmentVariable("SSSJ_ROTATION_LUA_RECEIPT") is string receipt)
+                File.WriteAllText(receipt, rotation.ClientLua());
             Assert.Null(weapons.Get(1, 200));
             Assert.Null(cards.Get(1, 300));
             Assert.Null(cards.Get(1, 99));

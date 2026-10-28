@@ -88,7 +88,7 @@ public sealed class GachaRotation
     public string ClientLua()
     {
         var plan = Read();
-        var script = new StringBuilder("local function apply(root,typ) if not root or not root.tbConf then return end for id,segs in pairs(root.tbConf) do for idx,v in ipairs(segs) do if not v._rotationOriginal then v._rotationOriginal={v.nStart,v.nEnd} end ");
+        var script = new StringBuilder("_G.__localGachaRotationApply=function() local function apply(root,typ) if not root or not root.tbConf then return end for id,segs in pairs(root.tbConf) do for idx,v in ipairs(segs) do if not v._rotationOriginal then v._rotationOriginal={v.nStart,v.nEnd} end ");
         script.Append(plan.Enabled ? "v.nStart=1 v.nEnd=1 " : "v.nStart=v._rotationOriginal[1] v.nEnd=v._rotationOriginal[2] ");
         script.Append("end end end apply(GachaCommon,1) apply(WeaponForge,0) ");
         if (plan.Enabled)
@@ -105,6 +105,9 @@ public sealed class GachaRotation
         }
         // The app sends the script each second only when the effective windows change.
         script.Append("local now=GetTime() for _,root in pairs({GachaCommon,WeaponForge}) do if root and root.tbConf then for _,segs in pairs(root.tbConf) do for _,v in ipairs(segs) do if v._rotationWindows then for _,w in ipairs(v._rotationWindows) do if w[1]<=now and now<w[2] then v.nStart=w[1] v.nEnd=w[2] end end v._rotationWindows=nil end end end end end");
+        // Login can precede LoadConfig, and configuration reloads replace tbConf.
+        // Keep the server-selected schedule effective after both events.
+        script.Append(" end for _,root in pairs({GachaCommon,WeaponForge}) do if root then root._localRotationHooks=root._localRotationHooks or {} for _,name in ipairs({'LoadConfig','GetCurPools'}) do if type(root[name])=='function' and not root._localRotationHooks[name] then local base=root[name] local after=name=='LoadConfig' root._localRotationHooks[name]=base root[name]=function(self,...) if not after then _G.__localGachaRotationApply() return base(self,...) end base(self,...) _G.__localGachaRotationApply() end end end end end _G.__localGachaRotationApply()");
         return script.ToString();
     }
 

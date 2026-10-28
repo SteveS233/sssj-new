@@ -52,4 +52,13 @@ internal sealed class HousePlacementLimits
         return _rules.Count > 0 || after.Furniture.Count(f => f.RoomId != 0 && f.ParentId != 0)
             <= before.Furniture.Count(f => f.RoomId != 0 && f.ParentId != 0);
     }
+
+    // The outdoor selector selects one scene. This is a saved-layout constraint,
+    // not a claim to reproduce Unity GameObject.activeInHierarchy on the server.
+    internal static bool OutdoorLimit(HouseTable table, HouseState before, HouseState after)
+    {
+        int Count(HouseState state) => state.Furniture.Count(f => f.RoomId != 0 && f.ParentId != 0
+            && table.ItemOf(f.TemplateId)?.Type == table.OutDoorScene);
+        return Count(after) <= Math.Max(1, Count(before));
+    }
 }

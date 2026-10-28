@@ -184,6 +184,15 @@ public sealed class GachaPool
 
     /// <summary>UP 自选箱物品（<c>UpBox</c> 列，四元组+N）。</summary>
     public int[]? UpBox { get; init; }
+    public int[]? GetItem { get; init; }
+    public int FreeType { get; init; }
+    public int FreeCount { get; init; }
+    public long FreeStart { get; init; }
+    public long FreeEnd { get; init; }
+
+    public bool FreeAvailableAt(long now, int used) => FreeType is 1 or 2 && FreeCount > 0
+        && used >= 0 && used < FreeCount
+        && !(FreeStart > 0 && FreeEnd > 0 && (now < FreeStart || now > FreeEnd));
 
     /// <summary>用哪一行 <c>CardStarSeed.txt</c>（<c>CardStarSeed</c> 列）。</summary>
     public int CardStarSeedId { get; init; }
@@ -445,6 +454,11 @@ public sealed class GachaTable
                 ProtectUpNum = raw.Int(row, "ProtectUpNum"),
                 UpBoxNum = raw.Int(row, "UpBoxNum"),
                 UpBox = ParseItem(raw.Str(row, "UpBox")),
+                GetItem = ParseItem(raw.Str(row, "GetItem")),
+                FreeType = raw.Int(row, "FreeType"),
+                FreeCount = raw.Int(row, "FreeCount"),
+                FreeStart = ParseTimeRange(raw.Str(row, "FreeTime")).Start,
+                FreeEnd = ParseTimeRange(raw.Str(row, "FreeTime")).End,
                 CardStarSeedId = raw.Int(row, "CardStarSeed"),
                 RotateVersion = raw.Int(row, "RotateVersion"),
                 StartTime = start,

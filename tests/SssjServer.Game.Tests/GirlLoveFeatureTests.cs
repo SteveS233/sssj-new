@@ -30,8 +30,8 @@ public class GirlLoveFeatureTests
         h.Player.GetGirl(1)!.Level = 15;
         int task = GirlLoveFeature.VarTaskId(1, GirlLoveFeature.ELevelOffset(11));
         h.Player.SetTask(3, task, old);
-        await h.DispatchFunctionAsync("ChapterMsg",
-            "{\"nState\":1,\"Chapter\":2,\"Index\":6,\"Difficult\":1,\"nStar\":7}");
+        await h.DispatchFunctionAsync("ChapterMsg", new JsonObject { ["nState"] = 0, ["Chapter"] = 2, ["Index"] = 6, ["Difficult"] = 1 }.ToJsonString());
+        await h.CompleteChapterAsync(2, 6, 1);
         Assert.Equal(expected, h.Player.GetTask(3, task));
         var saved = new PlayerStore(h.Options).Load(h.Player.Account)!;
         Assert.Equal(expected, saved.GetTask(3, task));

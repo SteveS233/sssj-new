@@ -1,4 +1,4 @@
-using SssjServer.Game.Config;
+﻿using SssjServer.Game.Config;
 using SssjServer.Game.Handlers;
 using Xunit;
 
